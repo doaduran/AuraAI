@@ -1,0 +1,52 @@
+# Aura – Background Removal Service
+
+[Aura](https://github.com/) uygulamasının parçası olan bu servis, kullanıcının yüklediği kıyafet
+fotoğraflarının arka planını kaldırır. Ücretsiz/düşük katmanlı bulut planlarında (Render, Koyeb, vb.)
+genelde ~512MB RAM ile çalışacak şekilde tasarlandı.
+
+## Mimari kararlar ve neden
+
+- **rembg yerine ham onnxruntime.** `rembg` paketini kurmak `scipy`, `scikit-image`,
+  `opencv-python-headless`, `pymatting` gibi ağır bağımlılıkları da zorunlu kılıyor; bunlar sunucu
+  hiç istek almadan sadece açılırken bile ~300–400MB taban bellek tüketiyordu. Bunun yerine
+  `u2netp.onnx` modelini (4MB) build sırasında imaja gömüp doğrudan `onnxruntime` ile çalıştırıyoruz.
+- **Tek seferde tek görsel.** FastAPI, senkron route'ları bir thread pool'da çalıştırır; art arda
+  gelen istekler paralel işlenirse bellek ihtiyacı katlanır. Bir `threading.Lock` ile inference'ı
+  serileştirip dar bellek bütçesinde ani OOM'ları önlüyoruz.
+- **ONNX memory arena kapalı.** `enable_cpu_mem_arena=False` / `enable_mem_pattern=False` —
+  varsayılan arena istekler arasında büyüyüp geri küçülmüyor, bu da zamanla bellek şişmesine katkı
+  sağlıyordu.
+- **Doğru alfa kompozisyonu.** Maske doğrudan `putalpha()` ile uygulanıyor; `Image.composite()` ile
+  şeffaf bir tuvale composite etmek kenarlardaki RGB değerlerini siyaha doğru karıştırıp renk
+  bozulmasına sebep oluyordu.
+- **JPEG draft-decode + thumbnail.** Telefon fotoğrafları (örn. 4032×3024) tam çözünürlükte belleğe
+  açılmadan önce `Image.draft()` ile küçük decode ediliyor, ardından `thumbnail()` ile kesin sınıra
+  çekiliyor.
+
+## Çalıştırma
+
+```bash
+docker build -t aura-bg .
+docker run -p 7860:7860 aura-bg
+```
+
+Opsiyonel: `PROXY_SECRET` ortam değişkeni set edilirse, `/removebg` endpoint'i sadece doğru
+`X-Proxy-Secret` header'ıyla gelen istekleri kabul eder.
+
+## API
+
+**POST** `/removebg`
+
+```json
+{ "image_file_b64": "<base64 encoded image>" }
+```
+
+Yanıt:
+
+```json
+{ "data": { "result_b64": "<base64 encoded transparent PNG>" } }
+```
+
+## Lisans
+
+MIT — bkz. [LICENSE](./LICENSE)

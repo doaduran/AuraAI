@@ -1,0 +1,6 @@
+name = "aura-worker"
+main = "src/index.js"
+compatibility_date = "2024-01-01"
+
+[vars]
+BG_REMOVAL_URL = "https://aura-bg-removal-1.onrender.com"
