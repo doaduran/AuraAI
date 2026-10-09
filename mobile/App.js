@@ -166,7 +166,7 @@ export default function App() {
   const [wardrobe, setWardrobe] = useState([]);
   const [hasCompletedQuiz, setHasCompletedQuiz] = useState(false);
   const [userStylePreference, setUserStylePreference] = useState('Minimalist');
-  const [quizModalVisible, setQuizModalVisible] = useState(true); // İlk açılışta true
+  const [quizModalVisible, setQuizModalVisible] = useState(false); // Artık zorunlu değil, ana ekrandaki "Stilini Bul" kartından açılıyor
 
   const [plannerModalVisible, setPlannerModalVisible] = useState(false);
   const [dayToPlan, setDayToPlan] = useState(null);
@@ -198,9 +198,7 @@ export default function App() {
 
         const storedQuiz = await AsyncStorage.getItem('aura_hasCompletedQuiz');
         if (storedQuiz) {
-          const hasCompleted = JSON.parse(storedQuiz);
-          setHasCompletedQuiz(hasCompleted);
-          setQuizModalVisible(!hasCompleted); // Testi çözdüyse modalı kapat
+          setHasCompletedQuiz(JSON.parse(storedQuiz));
         }
 
         const storedStyle = await AsyncStorage.getItem('aura_userStylePreference');
@@ -216,23 +214,6 @@ export default function App() {
     loadData();
   }, []);
 
-  // 2. VERİLER DEĞİŞTİKÇE OTOMATİK OLARAK HAFIZAYA KAYDET
-  useEffect(() => {
-    const saveData = async () => {
-      try {
-        await AsyncStorage.setItem('aura_wardrobe', JSON.stringify(wardrobe));
-        await AsyncStorage.setItem('aura_collections', JSON.stringify(collections));
-        await AsyncStorage.setItem('aura_colorAnalysis', JSON.stringify(colorAnalysis));
-        await AsyncStorage.setItem('aura_isPro', JSON.stringify(isPro));
-        await AsyncStorage.setItem('aura_hasCompletedQuiz', JSON.stringify(hasCompletedQuiz));
-        await AsyncStorage.setItem('aura_userStylePreference', userStylePreference);
-        await AsyncStorage.setItem('aura_lang', lang);
-      } catch (e) {
-        console.log('Veri kaydetme hatası:', e);
-      }
-    };
-    saveData();
-  }, [wardrobe, collections, colorAnalysis, isPro, hasCompletedQuiz, userStylePreference, lang]);
   // Kullanıcı Abonelik Planı (false = Free, true = Pro VIP)
   const [isPro, setIsPro] = useState(false);
   const [dailyOutfitCount, setDailyOutfitCount] = useState(0);
@@ -341,6 +322,27 @@ export default function App() {
     ]
   });
   const [colorLoading, setColorLoading] = useState(false);
+
+  // VERİLER DEĞİŞTİKÇE OTOMATİK OLARAK HAFIZAYA KAYDET
+  // (collections/colorAnalysis/isPro burada henüz tanımlanmadığı için bu effect
+  // eskiden daha yukarıdaydı ve "before initialization" hatası veriyordu - buraya,
+  // kullandığı tüm state'lerin tanımından SONRAYA taşındı.)
+  useEffect(() => {
+    const saveData = async () => {
+      try {
+        await AsyncStorage.setItem('aura_wardrobe', JSON.stringify(wardrobe));
+        await AsyncStorage.setItem('aura_collections', JSON.stringify(collections));
+        await AsyncStorage.setItem('aura_colorAnalysis', JSON.stringify(colorAnalysis));
+        await AsyncStorage.setItem('aura_isPro', JSON.stringify(isPro));
+        await AsyncStorage.setItem('aura_hasCompletedQuiz', JSON.stringify(hasCompletedQuiz));
+        await AsyncStorage.setItem('aura_userStylePreference', userStylePreference);
+        await AsyncStorage.setItem('aura_lang', lang);
+      } catch (e) {
+        console.log('Veri kaydetme hatası:', e);
+      }
+    };
+    saveData();
+  }, [wardrobe, collections, colorAnalysis, isPro, hasCompletedQuiz, userStylePreference, lang]);
 
   // Dolap güncellendiğinde veya Home sekmesine geçildiğinde kombin üret
   useEffect(() => {
@@ -1192,6 +1194,33 @@ Analyze this clothing item and respond ONLY in the following JSON format. Fill e
               </View>
             </View>
 
+            {/* Stilini Bul Kartı - test artık zorunlu değil, isteyen buradan açar */}
+            <TouchableOpacity
+              onPress={() => setQuizModalVisible(true)}
+              style={{
+                flexDirection: 'row',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+                backgroundColor: '#1C1B1A',
+                borderRadius: 16,
+                paddingVertical: 14,
+                paddingHorizontal: 16,
+                marginBottom: 4
+              }}
+            >
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                <Sparkles size={18} color="#FFF" />
+                <View>
+                  <Text style={{ fontSize: 13, fontWeight: '700', color: '#FFF' }}>
+                    {hasCompletedQuiz ? `Tarzın: ${userStylePreference}` : 'Stilini Bul'}
+                  </Text>
+                  <Text style={{ fontSize: 11, color: '#C9C2B8' }}>
+                    {hasCompletedQuiz ? 'Değiştirmek için dokun' : 'Sana özel öneriler için kısa bir test çöz'}
+                  </Text>
+                </View>
+              </View>
+            </TouchableOpacity>
+
             {/* Günün AI Kombini Kartı */}
             <View style={styles.sectionCard}>
               <View style={styles.cardHeader}>
@@ -1542,16 +1571,19 @@ Analyze this clothing item and respond ONLY in the following JSON format. Fill e
                   {isPro ? 'Aura Pro Aktif' : 'Aura Pro’ya Geçin'}
                 </Text>
               </View>
-              <Text style={{ fontSize: 12, color: '#D4C5B9', lineHeight: 17, marginBottom: 12 }}>
+              <Text style={{ fontSize: 12, color: '#D4C5B9', lineHeight: 17, marginBottom: 6 }}>
                 {isPro 
                   ? 'Sınırsız gardırop yükleme, sınırsız günlük swap ve gelişmiş yapay zeka analizine sahipsiniz.' 
                   : 'Sınırsız gardırop, sınırsız kombin üretimi ve derinlemesine renk analizi kilidini açın.'}
+              </Text>
+              <Text style={{ fontSize: 10, color: '#9A8F80', marginBottom: 12 }}>
+                (Demo — gerçek ödeme alınmaz, tek dokunuşla açılır/kapanır)
               </Text>
               <TouchableOpacity
                 onPress={() => {
                   setIsPro(!isPro);
                   Alert.alert('✨', !isPro
-                    ? (lang === 'tr' ? 'Aura Pro başarıyla aktifleştirildi!' : 'Aura Pro activated successfully!')
+                    ? (lang === 'tr' ? 'Aura Pro aktifleştirildi! (Demo — gerçek ödeme alınmadı)' : 'Aura Pro activated! (Demo — no real payment taken)')
                     : (lang === 'tr' ? 'Ücretsiz plana dönüldü.' : 'Switched back to the free plan.'));
                 }}
                 style={{
@@ -1853,7 +1885,7 @@ Analyze this clothing item and respond ONLY in the following JSON format. Fill e
         </KeyboardAvoidingView>
       </Modal>
 {/* 1. İLK GİRİŞ TARZ TESTİ MODALI */}
-      <Modal visible={quizModalVisible && !hasCompletedQuiz} animationType="fade" transparent={false}>
+      <Modal visible={quizModalVisible} animationType="fade" transparent={false}>
         <View style={{ flex: 1, backgroundColor: '#FAF8F5', padding: 24, justifyContent: 'center' }}>
           <View style={{ alignItems: 'center', marginBottom: 28 }}>
             <Sparkles size={36} color="#1C1B1A" />
