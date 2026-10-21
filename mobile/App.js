@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { 
   StyleSheet, 
   Text, 
@@ -8,11 +8,11 @@ import {
   SafeAreaView, 
   StatusBar, 
   Image, 
-  Alert,
   ActivityIndicator,
   Modal,
   TextInput,
   KeyboardAvoidingView,
+  Linking,
   Platform
 } from 'react-native';
 import { 
@@ -23,6 +23,7 @@ import {
   User, 
   Plus, 
   Camera, 
+  Image as GalleryIcon,
   Trash2, 
   Globe, 
   MessageCircle, 
@@ -40,6 +41,10 @@ import * as ImagePicker from 'expo-image-picker';
 import * as Location from 'expo-location';
 import { CloudSun, MapPin } from 'lucide-react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { useAppDialog } from './AppDialog';
+import { STYLE_NAMES, STYLE_LABELS, STYLE_QUESTIONS, scoreStyleProfile, styleContext, parseAIJson, selectOutfitItems } from './styleProfile';
+import { inspirationFeed, loadInspirationImage } from './inspirations';
+import StyleQuiz from './StyleQuiz';
 
 // === GÜVENLİK NOTU ===
 // API anahtarları artık uygulamanın içinde DEĞİL. Anahtarlar (Gemini, Remove.bg)
@@ -64,9 +69,12 @@ async function callGeminiAPI(parts, generationConfig = {}) {
   let lastError = null;
 
   for (let attempt = 0; attempt < maxRetries; attempt++) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 60000);
     try {
       const response = await fetch(`${PROXY_BASE_URL}/gemini`, {
         method: 'POST',
+        signal: controller.signal,
         headers: {
           'Content-Type': 'application/json',
           ...(APP_SHARED_SECRET ? { 'X-App-Secret': APP_SHARED_SECRET } : {}),
@@ -86,10 +94,15 @@ async function callGeminiAPI(parts, generationConfig = {}) {
       }
 
       lastError = new Error(data?.error || `HTTP ${response.status}`);
-      await sleep(1000 * (attempt + 1));
+      lastError.httpStatus = response.status;
+      lastError.retryable = [429, 502, 503, 504].includes(response.status);
+      // The proxy already retries models; do not repeat a complete busy-model cycle.
+      break;
     } catch (err) {
       lastError = err;
-      await sleep(1000 * (attempt + 1));
+      if (attempt + 1 < maxRetries) await sleep(1000 * (attempt + 1));
+    } finally {
+      clearTimeout(timeout);
     }
   }
 
@@ -160,18 +173,43 @@ const getItemField = (item, field, lang) => {
   return item?.[`${field}_${lang}`] || item?.[field] || '';
 };
 
+function InspirationPhoto({ uri, label, lang }) {
+  const [failed, setFailed] = useState(false);
+  const [retry, setRetry] = useState(0);
+  return (
+    <View style={{ aspectRatio: 0.8, backgroundColor: '#EDE8E1', width: '100%' }}>
+      {!failed ? <Image key={retry} source={{ uri }} accessibilityLabel={label} resizeMode="cover" style={{ width: '100%', height: '100%' }} onError={() => setFailed(true)} /> : (
+        <TouchableOpacity accessibilityRole="button" onPress={() => { setRetry(retry + 1); setFailed(false); }} style={{ flex: 1, alignItems: 'center', justifyContent: 'center', padding: 20 }}>
+          <GalleryIcon size={28} color="#7A6856" />
+          <Text style={{ textAlign: 'center', marginTop: 12, color: '#7A6856' }}>{lang === 'tr' ? 'Fotoğraf yüklenemedi. Yeniden dene.' : 'Could not load photo. Try again.'}</Text>
+        </TouchableOpacity>
+      )}
+    </View>
+  );
+}
+
 export default function App() {
   const [activeTab, setActiveTab] = useState('home');
   const [lang, setLang] = useState('tr');
+  const { showAlert, dialogView } = useAppDialog(lang);
+  const [dataLoaded, setDataLoaded] = useState(false);
   const [wardrobe, setWardrobe] = useState([]);
   const [hasCompletedQuiz, setHasCompletedQuiz] = useState(false);
   const [userStylePreference, setUserStylePreference] = useState('Minimalist');
   const [quizModalVisible, setQuizModalVisible] = useState(false); // Artık zorunlu değil, ana ekrandaki "Stilini Bul" kartından açılıyor
+  const [styleProfile, setStyleProfile] = useState(null);
+  const [quizAnswers, setQuizAnswers] = useState({});
+  const [quizStep, setQuizStep] = useState(0);
+  const [inspirationFilter, setInspirationFilter] = useState('all');
+  const [outfitError, setOutfitError] = useState('');
+  const outfitRequest = useRef(0);
 
   const [plannerModalVisible, setPlannerModalVisible] = useState(false);
   const [dayToPlan, setDayToPlan] = useState(null);
   const [clothOptionsModalVisible, setClothOptionsModalVisible] = useState(false);
   const [selectedCloth, setSelectedCloth] = useState(null);
+  const [photoPickerVisible, setPhotoPickerVisible] = useState(false);
+  const [photoPickerError, setPhotoPickerError] = useState('');
 
   const [isProUser, setIsProUser] = useState(false); // Kullanıcı Premium mu?
   const [proModalVisible, setProModalVisible] = useState(false); // Ödeme ekranı görünürlüğü
@@ -203,12 +241,28 @@ export default function App() {
 
         const storedStyle = await AsyncStorage.getItem('aura_userStylePreference');
         if (storedStyle) setUserStylePreference(storedStyle);
+        const storedProfile = await AsyncStorage.getItem('aura_styleProfile');
+        if (storedProfile) {
+          try {
+            const saved = JSON.parse(storedProfile);
+            if (saved) {
+              const profile = scoreStyleProfile(saved.answers);
+              setStyleProfile(profile);
+              setUserStylePreference(profile.primary);
+              setHasCompletedQuiz(true);
+            }
+          } catch (error) {
+            console.log('Stil profili yeniden tamamlanmalı:', error);
+          }
+        }
 
         const storedLang = await AsyncStorage.getItem('aura_lang');
         if (storedLang) setLang(storedLang);
 
       } catch (e) {
         console.log('Veri yükleme hatası:', e);
+      } finally {
+        setDataLoaded(true);
       }
     };
     loadData();
@@ -302,17 +356,11 @@ export default function App() {
   const [inputText, setInputText] = useState('');
   const [chatLoading, setChatLoading] = useState(false);
 
-  const exploreFeeds = [
-    { id: '1', title: 'Clean Girl Keten Takım', tags: '#minimal #linen #summer' },
-    { id: '2', title: 'Old Money Sonbahar Şıklığı', tags: '#blazer #classic #chic' },
-    { id: '3', title: 'Casual Kahve Kombini', tags: '#oversize #denim #street' }
-  ];
-
   // Kişisel Renk Analizi State'i
   const [colorAnalysis, setColorAnalysis] = useState({
-    season: 'Soft Summer (Yaz Esintisi)',
-    undertone: 'Cool (Soğuk Alt Ton)',
-    note: 'Pastel, küllü ve yumuşak tonlar cildinizin ışıltısını ön plana çıkarır.',
+    season: '',
+    undertone: '',
+    note: '',
     palette: [
       { name: "Sage", hex: "#A8BBA2" },
       { name: "Mauve", hex: "#C5A3AB" },
@@ -328,6 +376,7 @@ export default function App() {
   // eskiden daha yukarıdaydı ve "before initialization" hatası veriyordu - buraya,
   // kullandığı tüm state'lerin tanımından SONRAYA taşındı.)
   useEffect(() => {
+    if (!dataLoaded) return;
     const saveData = async () => {
       try {
         await AsyncStorage.setItem('aura_wardrobe', JSON.stringify(wardrobe));
@@ -336,33 +385,59 @@ export default function App() {
         await AsyncStorage.setItem('aura_isPro', JSON.stringify(isPro));
         await AsyncStorage.setItem('aura_hasCompletedQuiz', JSON.stringify(hasCompletedQuiz));
         await AsyncStorage.setItem('aura_userStylePreference', userStylePreference);
+        await AsyncStorage.setItem('aura_styleProfile', JSON.stringify(styleProfile));
         await AsyncStorage.setItem('aura_lang', lang);
       } catch (e) {
         console.log('Veri kaydetme hatası:', e);
       }
     };
     saveData();
-  }, [wardrobe, collections, colorAnalysis, isPro, hasCompletedQuiz, userStylePreference, lang]);
+  }, [dataLoaded, wardrobe, collections, colorAnalysis, isPro, hasCompletedQuiz, userStylePreference, styleProfile, lang]);
+
+  const personalStyleContext = styleContext(styleProfile, userStylePreference, lang);
+  const personalColorContext = colorAnalysis.analyzedAt
+    ? `${colorAnalysis.season}, ${colorAnalysis.undertone}; ${colorAnalysis.palette.map(color => `${color.name}: ${color.hex}`).join(', ')}`
+    : (lang === 'tr' ? 'Kişisel renk analizi henüz yapılmadı; bir renk tipi varsayma.' : 'Personal colors have not been analyzed; do not assume a color season.');
+
+  const startStyleQuiz = () => {
+    setQuizAnswers(styleProfile?.answers || {});
+    setQuizStep(0);
+    setQuizModalVisible(true);
+  };
+  const saveStyleQuiz = () => {
+    const profile = scoreStyleProfile(quizAnswers);
+    setStyleProfile(profile);
+    setUserStylePreference(profile.primary);
+    setHasCompletedQuiz(true);
+    setCurrentOutfit(null);
+    setOutfitError('');
+    setQuizModalVisible(false);
+  };
+  const quizResult = quizStep === STYLE_QUESTIONS.length ? scoreStyleProfile(quizAnswers) : null;
+  const displayedInspirations = inspirationFeed(inspirationFilter, userStylePreference);
 
   // Dolap güncellendiğinde veya Home sekmesine geçildiğinde kombin üret
   useEffect(() => {
-    if (activeTab === 'home' && wardrobe.length > 0 && !currentOutfit) {
+    if (dataLoaded && activeTab === 'home' && wardrobe.length > 0 && !currentOutfit) {
       generateSmartOutfit();
     }
-  }, [activeTab, wardrobe]);
+  }, [dataLoaded, activeTab, wardrobe, styleProfile, colorAnalysis.analyzedAt]);
 
   // AI Zeki Kombin Motoru
   const generateSmartOutfit = async () => {
+    const requestId = ++outfitRequest.current;
+    setOutfitError('');
     try {
       // 1. Kirlileri filtrele ve Favori etiketini ekle
       const availableWardrobe = wardrobe.filter(w => !w.isDirty);
       if (availableWardrobe.length === 0) {
-        Alert.alert(
+        showAlert(
           lang === 'tr' ? 'Uyarı' : 'Warning',
           lang === 'tr' ? 'Dolabında hiç temiz kıyafet kalmamış! Kirli sepetini kontrol et.' : 'No clean items left in your closet! Check your laundry basket.'
         );
         return;
       }
+      setOutfitLoading(true);
 
       const wardrobeSummary = availableWardrobe.map(w => 
         lang === 'tr'
@@ -374,9 +449,12 @@ export default function App() {
 ${wardrobeSummary}
 
 Güncel Hava Durumu: ${weather.temp}°C, ${weather.desc}
+Kullanıcının stil testi ve tercihleri: ${personalStyleContext}
+Kişisel renk önerileri: ${personalColorContext}
 
 GÖREVLER:
 - Bu temiz dolaptan hava durumuna uygun harika bir günlük kombin oluştur.
+- Stil testindeki kesim, renk, kullanım ortamı ve önceliklere uy. Yalnızca verilen ID'leri kullan; eksik parçaları uydurma. Mümkünse üst + alt veya tek parça seç; aksesuarı ana kıyafet sayma.
 - Kullanıcının [FAVORİ PARÇA] olarak işaretlediği kıyafetlere öncelik ver ve kombin merkezine onları koymaya çalış.
 - Katmanlama kurallarına dikkat et (örn. atlet üzerine gömlek/ceket gibi).
 - Desen çakışmalarından kaçın (örn. çizgili ve kareliyi üst üste giydirme).
@@ -390,9 +468,12 @@ GÖREVLER:
 ${wardrobeSummary}
 
 Current Weather: ${weather.temp}°C, ${weather.desc}
+User's style test and preferences: ${personalStyleContext}
+Personal color suggestions: ${personalColorContext}
 
 TASKS:
 - Create a great everyday outfit from this clean closet that fits the weather.
+- Respect the user's fit, palette, occasion and priority answers. Use only provided IDs; never invent missing pieces. Prefer a top + bottom or one-piece outfit; accessories cannot replace clothing.
 - Prioritize items marked [FAVORITE ITEM] and try to build the outfit around them.
 - Respect layering rules (e.g. shirt/jacket over a tank top).
 - Avoid pattern clashes (e.g. don't layer stripes with plaid).
@@ -404,28 +485,21 @@ TASKS:
 }
 `;
 
-      const rawOutput = await callGeminiAPI([{ text: prompt }]);
-      const jsonMatch = rawOutput.match(/\{[\s\S]*\}/);
-
-      if (jsonMatch) {
-        const parsed = JSON.parse(jsonMatch[0]);
-        const matchedItems = wardrobe.filter(w => parsed.selectedItemIds.includes(w.id));
-        
-        setCurrentOutfit({
-          title: parsed.outfitTitle,
-          note: parsed.stylistNote,
-          items: matchedItems.length > 0 ? matchedItems : [wardrobe[0]]
-        });
-      }
+      const rawOutput = await callGeminiAPI([{ text: prompt }], { responseMimeType: 'application/json', temperature: 0.5 });
+      const parsed = parseAIJson(rawOutput);
+      const matchedItems = selectOutfitItems(parsed.itemIds, availableWardrobe);
+      if (typeof parsed.title !== 'string' || typeof parsed.note !== 'string') throw new Error('Invalid outfit response');
+      if (requestId === outfitRequest.current) setCurrentOutfit({ title: parsed.title, note: parsed.note, items: matchedItems });
     } catch (e) {
       console.log('Kombin Hatası:', e);
-      setCurrentOutfit({
-        title: 'Günün Seçimi',
-        note: 'Dolabındaki parçalarla oluşturulan hava koşullarına uygun görünüm.',
-        items: [wardrobe[0]]
-      });
+      if (requestId === outfitRequest.current) {
+        setCurrentOutfit(null);
+        setOutfitError(e.retryable
+          ? (lang === 'tr' ? 'AI servisi şu an yoğun veya kullanım sınırına ulaştı. Biraz sonra tekrar dene.' : 'The AI service is busy or rate limited. Please try again shortly.')
+          : (lang === 'tr' ? 'Kombin şu an hazırlanamadı. Bağlantıyı ve dolabındaki temiz parçaları kontrol edip tekrar dene.' : 'Could not prepare an outfit. Check your connection and clean items, then try again.'));
+      }
     } finally {
-      setOutfitLoading(false);
+      if (requestId === outfitRequest.current) setOutfitLoading(false);
     }
   };
 
@@ -459,7 +533,7 @@ TASKS:
     });
     
     setWardrobe(updatedWardrobe);
-    Alert.alert(
+    showAlert(
       lang === 'tr' ? '🔥 Harika!' : '🔥 Nice!',
       lang === 'tr' ? 'Bu kombin bugün giyildi olarak kaydedildi. Dolap istatistiklerin güncellendi.' : 'This outfit was marked as worn today. Your closet stats have been updated.'
     );
@@ -478,15 +552,15 @@ TASKS:
       }
       return board;
     }));
-    Alert.alert('✨', lang === 'tr' ? 'Kombin panoya başarıyla kaydedildi!' : 'Outfit saved to board successfully!');
+    showAlert('✨', lang === 'tr' ? 'Kombin panoya başarıyla kaydedildi!' : 'Outfit saved to board successfully!');
   };
 
   const openSaveDialog = () => {
     if (!currentOutfit) {
-      Alert.alert(lang === 'tr' ? 'Bilgi' : 'Info', lang === 'tr' ? 'Önce bir kombin oluşturulmalı.' : 'You need to create an outfit first.');
+      showAlert(lang === 'tr' ? 'Bilgi' : 'Info', lang === 'tr' ? 'Önce bir kombin oluşturulmalı.' : 'You need to create an outfit first.');
       return;
     }
-    Alert.alert(
+    showAlert(
       lang === 'tr' ? 'Panoya Kaydet' : 'Save to Board',
       lang === 'tr' ? 'Bu kombini hangi panoya eklemek istersin?' : 'Choose a board:',
       [
@@ -502,10 +576,10 @@ TASKS:
   // Kombini Takvime Planlama Dialogu
   const openScheduleDialog = () => {
     if (!currentOutfit) {
-      Alert.alert(lang === 'tr' ? 'Bilgi' : 'Info', lang === 'tr' ? 'Önce bir kombin oluşturulmalı.' : 'You need to create an outfit first.');
+      showAlert(lang === 'tr' ? 'Bilgi' : 'Info', lang === 'tr' ? 'Önce bir kombin oluşturulmalı.' : 'You need to create an outfit first.');
       return;
     }
-    Alert.alert(
+    showAlert(
       lang === 'tr' ? 'Haftalık Takvime Planla' : 'Schedule to Planner',
       lang === 'tr' ? 'Bu kombini hangi gün için planlamak istersin?' : 'Choose a day:',
       [
@@ -516,7 +590,7 @@ TASKS:
               ...prev,
               [day]: currentOutfit
             }));
-            Alert.alert('📅', lang === 'tr' ? `${day} günü için kombin planlandı!` : `Outfit scheduled for ${day}!`);
+            showAlert('📅', lang === 'tr' ? `${day} günü için kombin planlandı!` : `Outfit scheduled for ${day}!`);
           }
         })),
         { text: lang === 'tr' ? 'İptal' : 'Cancel', style: 'cancel' }
@@ -526,29 +600,6 @@ TASKS:
   
   // İlham Kartına Tıklandığında Dolaptan Eşleştirme Yap
   
-  // Tarz Testine Göre Dinamik Değişen İlham Veritabanı
-  // Birebir Uyumlu ve Telifsiz Moda İlham Arşivi
-  // Anahtar kelimeye duyarlı (Keyword-based) Dinamik İlham Arşivi
-  const styleInspirations = {
-    'Minimalist': [
-      { id: 'm1', title: 'Minimalist & Clean', tag: 'Net kesimler ve nötr tonlar' },
-      { id: 'm2', title: 'Scandi Minimal', tag: 'Günlük rahat ve modern çizgi' },
-      { id: 'm3', title: 'Timeless Basics', tag: 'Zamansız temel parçalar' }
-    ],
-    'Streetwear': [
-      { id: 's1', title: 'Urban Street', tag: 'Oversize ve sokak kültürü' },
-      { id: 's2', title: '90s Grunge', tag: 'Baggy denim ve retro detaylar' }
-    ],
-    'Casual Chic': [
-      { id: 'c1', title: 'Smart Casual', tag: 'Ofis ve kahve şıklığı' },
-      { id: 'c2', title: 'French Casual', tag: 'Parisian günlük zarafet' }
-    ],
-    'Old Money': [
-      { id: 'o1', title: 'Quiet Luxury', tag: 'Kaşmir ve toprak tonları' },
-      { id: 'o2', title: 'Classic Heritage', tag: 'Kruvaze ve klasik zarafet' }
-    ]
-  };
-
   // Manuel Parça Seçip Çıkarma
   const toggleManualItem = (item) => {
     if (manualSelectedItems.some(i => i.id === item.id)) {
@@ -561,7 +612,7 @@ TASKS:
   // Manuel Kombini Kaydetme
   const saveManualOutfit = () => {
     if (manualSelectedItems.length === 0) {
-      Alert.alert(lang === 'tr' ? 'Uyarı' : 'Warning', lang === 'tr' ? 'Lütfen en az bir parça seçin.' : 'Please select at least one item.');
+      showAlert(lang === 'tr' ? 'Uyarı' : 'Warning', lang === 'tr' ? 'Lütfen en az bir parça seçin.' : 'Please select at least one item.');
       return;
     }
     const customOutfit = {
@@ -573,14 +624,34 @@ TASKS:
     setManualModalVisible(false);
     setManualSelectedItems([]);
     setActiveTab('home');
-    Alert.alert('✨', lang === 'tr' ? 'Özel kombin başarıyla hazırlandı ve ana sayfaya aktarıldı!' : 'Custom outfit created and sent to home screen!');
+    showAlert('✨', lang === 'tr' ? 'Özel kombin başarıyla hazırlandı ve ana sayfaya aktarıldı!' : 'Custom outfit created and sent to home screen!');
   };
   
+  const openInspirationSource = (url) => Linking.openURL(url).catch(() => showAlert(
+    lang === 'tr' ? 'Bağlantı açılamadı' : 'Could not open link',
+    lang === 'tr' ? 'Tarayıcı ayarlarını kontrol edip tekrar dene.' : 'Check browser settings and try again.'
+  ));
+
+  const pickInspirationPhoto = async () => {
+    if (matchingLoading) return;
+    try {
+      const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images'], base64: true, quality: 0.8 });
+      if (result.canceled) return;
+      const asset = result.assets?.[0];
+      if (!asset?.base64) throw new Error('Missing image data');
+      await handleMatchInspiration({ title: lang === 'tr' ? 'Seçtiğin ilham fotoğrafı' : 'Your inspiration photo', image: asset.uri, base64: asset.base64, mimeType: asset.mimeType });
+    } catch (error) {
+      showAlert(lang === 'tr' ? 'Fotoğraf açılamadı' : 'Could not open photo', lang === 'tr' ? 'Başka bir kombin fotoğrafıyla tekrar dene.' : 'Try another outfit photo.');
+    }
+  };
+
   const handleMatchInspiration = async (inspireItem) => {
-    if (wardrobe.length === 0) {
-      Alert.alert(
+    if (matchingLoading) return;
+    const availableWardrobe = wardrobe.filter(item => !item.isDirty);
+    if (availableWardrobe.length === 0) {
+      showAlert(
         lang === 'tr' ? 'Dolap Boş' : 'Closet Empty',
-        lang === 'tr' ? 'Bu stili eşleştirebilmemiz için önce dolabına birkaç kıyafet eklemelisin.' : 'Please add some items to your closet first.'
+        lang === 'tr' ? 'Bu görünümü eşleştirmek için dolabına birkaç temiz kıyafet ekle.' : 'Add a few clean items to match this look.'
       );
       return;
     }
@@ -590,7 +661,9 @@ TASKS:
     setMatchedOutfitResult(null);
 
     try {
-      const wardrobeSummary = wardrobe.map(w => ({
+      const reference = await loadInspirationImage(inspireItem);
+      const title = typeof inspireItem.title === 'string' ? inspireItem.title : inspireItem.title[lang];
+      const wardrobeSummary = availableWardrobe.map(w => ({
         id: w.id,
         subCategory: getItemField(w, 'subCategory', lang),
         color: getItemField(w, 'color', lang),
@@ -598,7 +671,10 @@ TASKS:
         category: w.mainCategory
       }));
 
-      const prompt = lang === 'tr' ? `Kullanıcı şu ilham stilini beğendi: "${inspireItem.title}" (${inspireItem.tag}).
+      const prompt = lang === 'tr' ? `Kullanıcı şu ilham fotoğrafını beğendi: "${title}". Ekteki FOTOĞRAFI incele; yalnızca başlığından çıkarım yapma.
+Stil profili: ${personalStyleContext}
+Renk önerileri: ${personalColorContext}
+Hava: ${weather.temp}°C, ${weather.desc}
 Kullanıcının gardırobundaki parçalar:
 ${JSON.stringify(wardrobeSummary)}
 
@@ -606,13 +682,17 @@ GÖREV:
 1. Kullanıcının gardırobundan bu ilham stiline EN YAKIN veya bu havayı yakalayacak parçaları seç ("matchedItemIds").
 2. Bu tarzı tamamlamak için dolabında eksik olan tek bir kilit parçayı öner ("missingItemAdvice").
 3. Kısa bir stilist notu yaz ("matchNote").
+4. Yalnızca verilen temiz parça ID'lerini kullan. Kişinin yüzünü veya bedenini değerlendirme; kıyafet kesimi, katmanlar, desen ve renklerle ilgilen. Tam kopya mümkün değilse bunu açıkça söyle.
 
 SADECE geçerli bir JSON döndür, alan değerleri Türkçe olsun:
 {
   "matchedItemIds": ["item_id_1", "item_id_2"],
   "matchNote": "Bu ilham stilindeki havayı dolabındaki parçalarla yakaladık.",
   "missingItemAdvice": "Görünümü tam Pinterest havasına sokmak için bej trençkot veya deri kemer ekleyebilirsin."
-}` : `The user liked this inspiration style: "${inspireItem.title}" (${inspireItem.tag}).
+}` : `The user liked this inspiration photo: "${title}". Examine the attached PHOTO, not just the title.
+Style profile: ${personalStyleContext}
+Color suggestions: ${personalColorContext}
+Weather: ${weather.temp}°C, ${weather.desc}
 Items in the user's wardrobe:
 ${JSON.stringify(wardrobeSummary)}
 
@@ -620,6 +700,7 @@ TASK:
 1. Pick the items from the user's wardrobe that are CLOSEST to this inspiration style or capture its vibe ("matchedItemIds").
 2. Suggest a single key item missing from their closet that would complete this look ("missingItemAdvice").
 3. Write a short stylist note ("matchNote").
+4. Use only the supplied clean item IDs. Discuss clothing cuts, layers, patterns and colors, not the person's face or body. State when the closet cannot reproduce the look.
 
 Return ONLY valid JSON, with field values in English:
 {
@@ -628,23 +709,24 @@ Return ONLY valid JSON, with field values in English:
   "missingItemAdvice": "Add a beige trench coat or a leather belt to nail the Pinterest-perfect look."
 }`;
 
-      const rawText = await callGeminiAPI([{ text: prompt }]);
-      const jsonMatch = rawText.match(/\{[\s\S]*\}/);
-
-      if (jsonMatch) {
-        const parsed = JSON.parse(jsonMatch[0]);
-        const items = wardrobe.filter(w => parsed.matchedItemIds?.includes(w.id));
+      const rawText = await callGeminiAPI([
+        { text: prompt },
+        { inline_data: { mime_type: reference.mimeType, data: reference.data } },
+      ], { responseMimeType: 'application/json', temperature: 0.3 });
+      const parsed = parseAIJson(rawText);
+      const items = selectOutfitItems(parsed.matchedItemIds, availableWardrobe);
+      if (typeof parsed.matchNote !== 'string' || typeof parsed.missingItemAdvice !== 'string') throw new Error('Invalid match result');
 
         setMatchedOutfitResult({
-          inspireTitle: inspireItem.title,
+          inspireTitle: title,
+          image: inspireItem.image,
           note: parsed.matchNote,
           missingPiece: parsed.missingItemAdvice,
-          items: items.length > 0 ? items : [wardrobe[0]]
+          items
         });
-      }
     } catch (error) {
       console.log('Eşleştirme Hatası:', error);
-      Alert.alert(lang === 'tr' ? 'Hata' : 'Error', lang === 'tr' ? 'Kombin eşleştirilirken bir sorun oluştu.' : 'Something went wrong while matching the outfit.');
+      showAlert(lang === 'tr' ? 'Hata' : 'Error', lang === 'tr' ? 'Kombin eşleştirilirken bir sorun oluştu.' : 'Something went wrong while matching the outfit.');
       setMatchModalVisible(false);
     } finally {
       setMatchingLoading(false);
@@ -671,6 +753,8 @@ Return ONLY valid JSON, with field values in English:
       const prompt = lang === 'tr' ? `Sen dünyanın en iyi, samimi ve vizyoner kişisel moda stilistisin (Personal AI Stylist).
 Kullanıcının gardırobundaki kullanıma hazır (TEMİZ) parçalar: ${wardrobeSummary || 'Dolapta henüz temiz/kayıtlı kıyafet yok.'}
 Kullanıcının Renk Tipi / Alt Tonu: ${colorAnalysis.season} - ${colorAnalysis.undertone}
+Stil testi ve tercihler: ${personalStyleContext}
+Doğrulanmış renk analizi bağlamı: ${personalColorContext}
 Güncel Hava Durumu: ${weather.city}, ${weather.temp}°C, ${weather.desc}
 
 Kullanıcının Sorusu/İsteği: "${userMsg.text}"
@@ -683,6 +767,8 @@ GÖREV:
 - Yanıtın samimi, şık, ilham verici ve net olsun (en fazla 2-3 kısa paragraf), Türkçe yaz.` : `You are the world's best, warm and visionary Personal AI Stylist.
 Ready-to-wear (CLEAN) items in the user's wardrobe: ${wardrobeSummary || 'No clean/saved items in the closet yet.'}
 User's Color Season / Undertone: ${colorAnalysis.season} - ${colorAnalysis.undertone}
+Style test and preferences: ${personalStyleContext}
+Available color analysis context: ${personalColorContext}
 Current Weather: ${weather.city}, ${weather.temp}°C, ${weather.desc}
 
 User's Question/Request: "${userMsg.text}"
@@ -706,44 +792,59 @@ TASK:
 
 // Yüz / Selfie Seçimi
   const handleStartColorAnalysis = () => {
-    Alert.alert(
+    if (colorLoading) return;
+    showAlert(
       lang === 'tr' ? "Renk Analizi İçin Selfie Seç" : "Select Selfie for Color Analysis",
       lang === 'tr' ? "Doğal ışıkta çekilmiş net bir yüz fotoğrafı seçin." : "Choose a clear face photo in natural light.",
       [
         { 
           text: lang === 'tr' ? "📸 Kamera ile Çek" : "📸 Camera", 
-          onPress: async () => {
-            const res = await ImagePicker.launchCameraAsync({ quality: 0.35, base64: true });
-            if (!res.canceled && res.assets && res.assets[0]) {
-              analyzeFaceWithAI(res.assets[0].base64);
-            }
-          } 
+          onPress: () => pickSelfiePhoto('camera')
         },
         { 
           text: lang === 'tr' ? "🖼️ Galeriden Seç" : "🖼️ Gallery", 
-          onPress: async () => {
-            const res = await ImagePicker.launchImageLibraryAsync({ quality: 0.35, base64: true });
-            if (!res.canceled && res.assets && res.assets[0]) {
-              analyzeFaceWithAI(res.assets[0].base64);
-            }
-          } 
+          onPress: () => pickSelfiePhoto('gallery')
         },
         { text: lang === 'tr' ? "İptal" : "Cancel", style: "cancel" }
       ]
     );
   };
 
+  const pickSelfiePhoto = async (source) => {
+    try {
+      if (Platform.OS !== 'web') {
+        const permission = source === 'camera'
+          ? await ImagePicker.requestCameraPermissionsAsync()
+          : await ImagePicker.requestMediaLibraryPermissionsAsync();
+        if (!permission.granted) throw new Error('Photo permission denied');
+      }
+      const options = { mediaTypes: ['images'], base64: true, quality: 0.8, cameraType: 'front' };
+      // No await before launching on web: the browser requires a direct user gesture.
+      const result = source === 'camera'
+        ? await ImagePicker.launchCameraAsync(options)
+        : await ImagePicker.launchImageLibraryAsync(options);
+      if (result.canceled) return;
+      const asset = result.assets?.[0];
+      if (!asset?.base64) throw new Error('Photo data missing');
+      await analyzeFaceWithAI(asset.base64, asset.mimeType || 'image/jpeg');
+    } catch (error) {
+      showAlert(lang === 'tr' ? 'Fotoğraf açılamadı' : 'Could not open photo', lang === 'tr' ? 'Kamera veya fotoğraf izinlerini kontrol et. Galeriden de bir selfie seçebilirsin.' : 'Check camera or photo permissions. You can also choose a selfie from the gallery.');
+    }
+  };
+
   // Gemini AI Yüz Analiz Motoru
-  const analyzeFaceWithAI = async (base64Img) => {
+  const analyzeFaceWithAI = async (base64Img, mimeType = 'image/jpeg') => {
     setColorLoading(true);
     try {
       const prompt = lang === 'tr' ? `Sen dünyanın en iyi profesyonel kişisel renk analistisin (Seasonal Color Analysis Expert).
 Fotoğraftaki kişinin yüzünü, ten rengini, göz ve saç kontrastını analiz et.
 Kişinin hangi 12 mevsimsel renk tipine ait olduğunu (örn: Deep Winter, Soft Summer, Warm Autumn, Light Spring, True Winter, Dark Autumn vb.) ve cilt alt tonunu (Warm/Cool/Neutral) tespit et.
-Ona en çok yakışacak 5 ana rengi (İsim ve HEX koduyla) ve 1 cümlelik stilist notunu ver.
+Bu fotoğraftaki ışığa göre yaklaşık bir stil önerisi yap; kesin analiz iddiasında bulunma. Yüz görünmüyorsa faceDetected false olsun; mevsim veya palet uydurma.
+Ona yakışabilecek 5 ana rengi (İsim ve HEX koduyla) ve 1 cümlelik stilist notunu ver.
 
 SADECE geçerli bir JSON formatında, "note" ve renk isimleri Türkçe olacak şekilde yanıt ver:
 {
+  "faceDetected": true,
   "season": "Mevsim Tipi (örn: Deep Winter)",
   "undertone": "Alt Ton (örn: Cool / Soğuk)",
   "note": "Kısa ve net renk tavsiye notu.",
@@ -757,10 +858,12 @@ SADECE geçerli bir JSON formatında, "note" ve renk isimleri Türkçe olacak ş
 }` : `You are the world's best professional Seasonal Color Analysis Expert.
 Analyze the person's face in the photo: skin tone, and eye/hair contrast.
 Determine which of the 12 seasonal color types they belong to (e.g. Deep Winter, Soft Summer, Warm Autumn, Light Spring, True Winter, Dark Autumn, etc.) and their skin undertone (Warm/Cool/Neutral).
-Give the 5 main colors that suit them best (name and HEX code) and a 1-sentence stylist note.
+Make an approximate styling suggestion based on the lighting in this photo, without claiming certainty. If no face is visible, set faceDetected to false and do not invent a season or palette.
+Give 5 suggested colors (name and HEX code) and a 1-sentence stylist note.
 
 Respond ONLY in valid JSON, with "note" and color names in English:
 {
+  "faceDetected": true,
   "season": "Season Type (e.g. Deep Winter)",
   "undertone": "Undertone (e.g. Cool)",
   "note": "Short, clear color advice note.",
@@ -776,27 +879,31 @@ Respond ONLY in valid JSON, with "note" and color names in English:
       const rawText = await callGeminiAPI(
         [
           { text: prompt },
-          { inline_data: { mime_type: "image/jpeg", data: base64Img } }
+          { inline_data: { mime_type: mimeType, data: base64Img } }
         ],
         { temperature: 0.1, responseMimeType: "application/json" }
       );
-      const parsed = JSON.parse(rawText);
-
-      if (parsed.palette && parsed.palette.length > 0) {
+      const parsed = parseAIJson(rawText);
+      if (parsed.faceDetected !== true || typeof parsed.season !== 'string' || typeof parsed.undertone !== 'string' ||
+        !Array.isArray(parsed.palette) || parsed.palette.length !== 5 ||
+        parsed.palette.some(color => typeof color.name !== 'string' || !/^#[0-9a-f]{6}$/i.test(color.hex))) {
+        throw new Error('Invalid face or palette result');
+      }
         setColorAnalysis({
-          season: parsed.season || 'Deep Winter',
-          undertone: parsed.undertone || (lang === 'tr' ? 'Cool (Soğuk)' : 'Cool'),
+          season: parsed.season,
+          undertone: parsed.undertone,
           note: parsed.note || (lang === 'tr' ? 'Cildinize en uygun renk paleti çıkarıldı.' : 'The color palette that best suits your skin has been generated.'),
-          palette: parsed.palette
+          palette: parsed.palette,
+          analyzedAt: new Date().toISOString(),
         });
-        Alert.alert(
+        setCurrentOutfit(null);
+        showAlert(
           lang === 'tr' ? '✨ Analiz Tamamlandı' : '✨ Analysis Complete',
           lang === 'tr' ? `${parsed.season} paletiniz hazır!` : `Your ${parsed.season} palette is ready!`
         );
-      }
     } catch (e) {
       console.log('Renk Analizi Hatası:', e);
-      Alert.alert(
+      showAlert(
         lang === 'tr' ? 'Uyarı' : 'Warning',
         lang === 'tr' ? 'Renk analizi yapılırken bir sorun oluştu. Lütfen yüzünüzün net göründüğü bir fotoğraf ile tekrar deneyin.' : 'Something went wrong during color analysis. Please try again with a clear photo of your face.'
       );
@@ -807,7 +914,12 @@ Respond ONLY in valid JSON, with "note" and color names in English:
 
   // 1. KAMERA VE GALERİ SEÇİM MENÜSÜ
   const handleAddPhoto = () => {
-    Alert.alert(
+    if (Platform.OS === 'web') {
+      setPhotoPickerError('');
+      setPhotoPickerVisible(true);
+      return;
+    }
+    showAlert(
       lang === 'tr' ? "Kıyafet Ekle" : "Add Item",
       lang === 'tr' ? "Fotoğrafı nereden eklemek istersin?" : "Where would you like to add the photo from?",
       [
@@ -818,44 +930,63 @@ Respond ONLY in valid JSON, with "note" and color names in English:
     );
   };
 
- // 2. KAMERA AÇMA FONKSİYONU
-  const openCamera = async () => {
+  // Web'de seçici, kullanıcı tıklamasından hemen başlatılmalı.
+  const pickWardrobePhoto = async (source) => {
     if (!isProUser && wardrobe.length >= FREE_ITEM_LIMIT) {
+      setPhotoPickerVisible(false);
       setProModalVisible(true);
       return;
     }
-    let result = await ImagePicker.launchCameraAsync({
-      mediaTypes: ImagePicker.MediaTypeOptions.Images,
-      allowsEditing: false,
-      base64: true, // İŞTE KRİTİK NOKTA BURASI: Yapay zeka için resmi hazırlıyoruz
-      quality: 0.8,
-    });
-    if (!result.canceled) {
-      processAndAnalyzeImage(result.assets[0].uri, result.assets[0].base64);
+    setPhotoPickerError('');
+    try {
+      // Tarayıcıda izin beklemek tıklama bağlantısını koparabilir.
+      if (Platform.OS !== 'web') {
+        const permission = source === 'camera'
+          ? await ImagePicker.requestCameraPermissionsAsync()
+          : await ImagePicker.requestMediaLibraryPermissionsAsync();
+        if (!permission.granted) {
+          showAlert(
+            lang === 'tr' ? 'İzin gerekli' : 'Permission required',
+            lang === 'tr'
+              ? 'Fotoğraf eklemek için cihaz ayarlarından kamera veya fotoğraf erişimine izin ver.'
+              : 'Allow camera or photo access in your device settings to add a photo.'
+          );
+          return;
+        }
+      }
+      const options = {
+        mediaTypes: ImagePicker.MediaTypeOptions.Images,
+        allowsEditing: false,
+        base64: true,
+        quality: 0.8,
+      };
+      const result = source === 'camera'
+        ? await ImagePicker.launchCameraAsync(options)
+        : await ImagePicker.launchImageLibraryAsync(options);
+      if (result.canceled) return;
+      const asset = result.assets?.[0];
+      if (!asset?.uri || !asset.base64) throw new Error('Missing photo data');
+      setPhotoPickerVisible(false);
+      processAndAnalyzeImage(asset.uri, asset.base64, asset.mimeType || 'image/jpeg');
+    } catch (error) {
+      console.log('Fotoğraf seçme hatası:', error);
+      const message = lang === 'tr'
+        ? 'Fotoğraf açılamadı. Kamera veya fotoğraf erişimini kontrol et ya da galeriden tekrar dene.'
+        : 'Could not open the photo. Check camera or photo access, or try the gallery again.';
+      if (Platform.OS === 'web') {
+        setPhotoPickerError(message);
+      } else {
+        showAlert(lang === 'tr' ? 'Fotoğraf eklenemedi' : 'Could not add photo', message);
+      }
     }
   };
-
-  // 3. GALERİ AÇMA FONKSİYONU
-  const openGallery = async () => {
-    if (!isProUser && wardrobe.length >= FREE_ITEM_LIMIT) {
-      setProModalVisible(true);
-      return;
-    }
-    let result = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ImagePicker.MediaTypeOptions.Images,
-      allowsEditing: false,
-      base64: true, // İŞTE KRİTİK NOKTA BURASI
-      quality: 0.8,
-    });
-    if (!result.canceled) {
-      processAndAnalyzeImage(result.assets[0].uri, result.assets[0].base64);
-    }
-  };
+  const openCamera = () => pickWardrobePhoto('camera');
+  const openGallery = () => pickWardrobePhoto('gallery');
 
 // ANA İŞLEME VE GEMINI ANALİZİ
 // removeBackgroundSafe ve callGeminiAPI dosyanın en üstünde, proxy üzerinden
 // çalışan TEK merkezi fonksiyonlar olarak tanımlı (bkz. dosya başı).
-const processAndAnalyzeImage = async (imageUri, originalBase64) => {
+const processAndAnalyzeImage = async (imageUri, originalBase64, mimeType = 'image/jpeg') => {
   setLoading(true);
   try {
     if (!originalBase64) {
@@ -902,7 +1033,7 @@ Analyze this clothing item and respond ONLY in the following JSON format. Fill e
       callGeminiAPI(
         [
           { text: prompt },
-          { inline_data: { mime_type: "image/jpeg", data: originalBase64 } }
+          { inline_data: { mime_type: mimeType, data: originalBase64 } }
         ],
         { temperature: 0.1, responseMimeType: "application/json" }
       )
@@ -933,7 +1064,7 @@ Analyze this clothing item and respond ONLY in the following JSON format. Fill e
 
   } catch (error) {
     console.log("İşlem hatası:", error);
-    Alert.alert(
+    showAlert(
       lang === 'tr' ? 'Ekleme Başarısız' : 'Failed to Add',
       error.message || (lang === 'tr' ? 'Bilinmeyen bir hata oluştu.' : 'An unknown error occurred.')
     );
@@ -1123,44 +1254,40 @@ Analyze this clothing item and respond ONLY in the following JSON format. Fill e
           <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.tabSection}>
             <View style={{ marginBottom: 20 }}>
               <Text style={styles.sectionHeading}>{lang === 'tr' ? 'Stil İlhamı' : 'Style Inspiration'}</Text>
-              <Text style={styles.subText}>{lang === 'tr' ? 'Bugün hangi ruh halindesin? Tarzını seç.' : 'Choose your style mood today.'}</Text>
+              <Text style={styles.subText}>{lang === 'tr' ? 'Fotoğrafları keşfet, beğendiğin görünümü kendi dolabınla yorumla.' : 'Explore photos and recreate a look with your own wardrobe.'}</Text>
             </View>
-
-            <View style={{ gap: 14 }}>
-              {[
-                { title: 'Minimalist & Clean', desc: 'Net kesimler, nötr tonlar ve zamansız parçalar.', tag: 'Scandi & Quiet Luxury' },
-                { title: 'Streetwear & Urban', desc: 'Oversize kesimler, hoodie ve sneaker kültürü.', tag: 'Street Style' },
-                { title: 'Old Money / Classy', desc: 'Kaşmir kazaklar, blazer ceketler ve klasik zarafet.', tag: 'Heritage' },
-                { title: 'Smart Casual Chic', desc: 'Günlük şıklık, gömlek ve kumaş pantolon uyumu.', tag: 'Office & Coffee' },
-                { title: '90s Vintage Grunge', desc: 'Baggy denim, deri ceketler ve retro detaylar.', tag: 'Retro' },
-                { title: 'Boho & Linen Flow', desc: 'Yazlık keten dokular, toprak tonları ve doğal stiller.', tag: 'Bohemian' }
-              ].map((item, idx) => (
-                <TouchableOpacity 
-                  key={idx} 
-                  onPress={() => Alert.alert(
-                    lang === 'tr' ? '✨ Tarz Seçildi' : '✨ Style Selected',
-                    lang === 'tr' ? `"${item.title}" stili AI kombin motoruna işlendi!` : `"${item.title}" style has been sent to the AI outfit engine!`
-                  )}
-                  style={{ 
-                    backgroundColor: '#FFF', 
-                    padding: 20, 
-                    borderRadius: 16, 
-                    borderWidth: 1, 
-                    borderColor: '#EDE8E1',
-                    flexDirection: 'row',
-                    justifyContent: 'space-between',
-                    alignItems: 'center'
-                  }}
-                >
-                  <View style={{ flex: 1, paddingRight: 10 }}>
-                    <Text style={{ fontSize: 11, fontWeight: '700', color: '#7A6856', marginBottom: 4, textTransform: 'uppercase', letterSpacing: 0.5 }}>{item.tag}</Text>
-                    <Text style={{ fontSize: 16, fontWeight: '800', color: '#1C1B1A', marginBottom: 4 }}>{item.title}</Text>
-                    <Text style={{ fontSize: 13, color: '#8C857E' }}>{item.desc}</Text>
-                  </View>
-                  <View style={{ width: 36, height: 36, borderRadius: 18, backgroundColor: '#FAF8F5', justifyContent: 'center', alignItems: 'center', borderWidth: 1, borderColor: '#EDE8E1' }}>
-                    <Text style={{ fontSize: 16, color: '#1C1B1A', fontWeight: '600' }}>→</Text>
-                  </View>
+            <View style={{ gap: 10, marginBottom: 18 }}>
+              <TouchableOpacity accessibilityRole="button" style={styles.primaryButton} onPress={() => openInspirationSource(`https://www.pinterest.com/search/pins/?q=${encodeURIComponent(`${userStylePreference} outfit ideas`)}`)}>
+                <Text style={styles.primaryButtonText}>{lang === 'tr' ? 'Pinterest’te keşfet ↗' : 'Explore on Pinterest ↗'}</Text>
+              </TouchableOpacity>
+              <TouchableOpacity accessibilityRole="button" style={styles.photoPickerButton} onPress={pickInspirationPhoto}>
+                <GalleryIcon size={20} color="#1C1B1A" />
+                <Text>{lang === 'tr' ? 'Kendi ilham fotoğrafını seç' : 'Choose your own inspiration photo'}</Text>
+              </TouchableOpacity>
+              <Text style={styles.subText}>{lang === 'tr' ? 'Kaynaklı fotoğraf seçkisi · Pinterest düğmesi ayrı sayfada açılır.' : 'Curated photos with sources · Pinterest opens on a separate page.'}</Text>
+            </View>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 8, paddingBottom: 18 }}>
+              {['all', ...STYLE_NAMES].map(style => (
+                <TouchableOpacity key={style} accessibilityRole="button" accessibilityState={{ selected: inspirationFilter === style }} onPress={() => setInspirationFilter(style)} style={[styles.filterChip, inspirationFilter === style && { backgroundColor: '#1C1B1A' }]}>
+                  <Text style={{ color: inspirationFilter === style ? '#FFF' : '#1C1B1A' }}>{style === 'all' ? (lang === 'tr' ? 'Tümü' : 'All') : STYLE_LABELS[style][lang]}</Text>
                 </TouchableOpacity>
+              ))}
+            </ScrollView>
+            <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 14 }}>
+              {displayedInspirations.map(item => (
+                <View key={item.id} style={styles.inspirationCard}>
+                  <InspirationPhoto uri={item.image} label={item.title[lang]} lang={lang} />
+                  <View style={{ padding: 14, gap: 8 }}>
+                    <Text style={{ color: '#7A6856', fontSize: 11 }}>{item.styles.map(style => STYLE_LABELS[style][lang]).join(' · ')}</Text>
+                    <Text style={{ fontSize: 16, fontWeight: '800', color: '#1C1B1A' }}>{item.title[lang]}</Text>
+                    <TouchableOpacity accessibilityRole="link" onPress={() => openInspirationSource(`${item.source}?utm_source=aura&utm_medium=referral`)}>
+                      <Text style={{ fontSize: 11, color: '#7A6856', textDecorationLine: 'underline' }}>{item.photographer} / Unsplash ↗</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity accessibilityRole="button" disabled={matchingLoading} onPress={() => handleMatchInspiration(item)} style={styles.primaryButton}>
+                      <Text style={styles.primaryButtonText}>{lang === 'tr' ? 'Dolabımla eşleştir' : 'Match my wardrobe'}</Text>
+                    </TouchableOpacity>
+                  </View>
+                </View>
               ))}
             </View>
             <View style={{ height: 100 }} />
@@ -1196,7 +1323,7 @@ Analyze this clothing item and respond ONLY in the following JSON format. Fill e
 
             {/* Stilini Bul Kartı - test artık zorunlu değil, isteyen buradan açar */}
             <TouchableOpacity
-              onPress={() => setQuizModalVisible(true)}
+              onPress={startStyleQuiz}
               style={{
                 flexDirection: 'row',
                 justifyContent: 'space-between',
@@ -1212,10 +1339,10 @@ Analyze this clothing item and respond ONLY in the following JSON format. Fill e
                 <Sparkles size={18} color="#FFF" />
                 <View>
                   <Text style={{ fontSize: 13, fontWeight: '700', color: '#FFF' }}>
-                    {hasCompletedQuiz ? `Tarzın: ${userStylePreference}` : 'Stilini Bul'}
+                    {styleProfile ? `${lang === 'tr' ? 'Tarzın' : 'Your style'}: ${STYLE_LABELS[styleProfile.primary][lang]}` : (lang === 'tr' ? 'Stilini Bul' : 'Find Your Style')}
                   </Text>
                   <Text style={{ fontSize: 11, color: '#C9C2B8' }}>
-                    {hasCompletedQuiz ? 'Değiştirmek için dokun' : 'Sana özel öneriler için kısa bir test çöz'}
+                    {styleProfile ? (lang === 'tr' ? '5 cevapla kişiselleştirildi · Yeniden düzenle' : 'Personalized with 5 answers · Edit') : (lang === 'tr' ? '5 kısa soruyla sana özel kombin önerileri' : '5 quick questions for personal outfit ideas')}
                   </Text>
                 </View>
               </View>
@@ -1263,7 +1390,7 @@ Analyze this clothing item and respond ONLY in the following JSON format. Fill e
                       style={styles.swapButton} 
                       onPress={() => {
                         if (!isPro && dailyOutfitCount >= 3) {
-                          Alert.alert(
+                          showAlert(
                             lang === 'tr' ? '✨ Limit Aşıldı' : '✨ Limit Reached',
                             lang === 'tr' ? 'Ücretsiz planda günde 3 kombin üretebilirsiniz. Pro plana geçin.' : 'You can generate 3 outfits per day on the free plan. Upgrade to Pro.'
                           );
@@ -1294,7 +1421,14 @@ Analyze this clothing item and respond ONLY in the following JSON format. Fill e
                     </TouchableOpacity>
                   </View>
                 </View>
-              ) : null}
+              ) : (
+                <View style={{ paddingVertical: 20, gap: 14 }}>
+                  <Text style={{ color: '#7A6856', lineHeight: 22 }}>{outfitError || (lang === 'tr' ? 'Temiz parçalarınla yeni bir kombin hazırlayabilirsin.' : 'Create an outfit with your clean items.')}</Text>
+                  <TouchableOpacity accessibilityRole="button" onPress={generateSmartOutfit} style={styles.primaryButton}>
+                    <Text style={styles.primaryButtonText}>{lang === 'tr' ? 'Tekrar dene' : 'Try again'}</Text>
+                  </TouchableOpacity>
+                </View>
+              )}
             </View>
 
             {/* Kişisel Renk Paleti Kartı (Tek ve Dinamik) */}
@@ -1302,7 +1436,7 @@ Analyze this clothing item and respond ONLY in the following JSON format. Fill e
               <View style={styles.rowBetween}>
                 <View style={{ flex: 1, paddingRight: 8 }}>
                   <Text style={styles.cardTitle}>{lang === 'tr' ? 'Kişisel Renk Paletin' : 'Your Color Palette'}</Text>
-                  <Text style={styles.subText}>{colorAnalysis.season} • {colorAnalysis.undertone}</Text>
+                  <Text style={styles.subText}>{colorAnalysis.analyzedAt ? `${colorAnalysis.season} • ${colorAnalysis.undertone}` : (lang === 'tr' ? 'Örnek palet · Kişisel analiz için selfie seç' : 'Sample palette · Choose a selfie to personalize')}</Text>
                 </View>
                 <TouchableOpacity 
                   onPress={handleStartColorAnalysis}
@@ -1339,7 +1473,7 @@ Analyze this clothing item and respond ONLY in the following JSON format. Fill e
                     ))}
                   </View>
                   <View style={{ backgroundColor: '#FAF8F5', padding: 12, borderRadius: 12, marginTop: 14, borderWidth: 1, borderColor: '#EDE8E1' }}>
-                    <Text style={{ fontSize: 11, color: '#5C554E', lineHeight: 16 }}>💡 {colorAnalysis.note}</Text>
+                    <Text style={{ fontSize: 11, color: '#5C554E', lineHeight: 16 }}>💡 {colorAnalysis.analyzedAt ? `${colorAnalysis.note} ` : ''}{lang === 'tr' ? 'Doğal ışıkta, filtresiz bir selfie seç. Fotoğraftan renk önerisi yaklaşık bir yorumdur; ışık ve kamera sonucu etkiler.' : 'Choose an unfiltered selfie in natural light. Photo-based color suggestions are approximate; lighting and camera affect the result.'}</Text>
                   </View>
                 </View>
               )}
@@ -1441,7 +1575,7 @@ Analyze this clothing item and respond ONLY in the following JSON format. Fill e
 
                     // 2. Uyarı veya Doğrudan Kayıt İşlemi
                     if (conflictDay) {
-                      Alert.alert(
+                      showAlert(
                         lang === 'tr' ? '👗 Aynı Parça Uyarısı' : '👗 Duplicate Item Warning',
                         lang === 'tr'
                           ? `Bu kombindeki "${conflictItemName}" parçasını zaten ${conflictDay} günü için planlamışsın. Yine de eklemek ister misin?`
@@ -1460,7 +1594,7 @@ Analyze this clothing item and respond ONLY in the following JSON format. Fill e
                     } else {
                       setWeeklyPlanner(prev => ({ ...prev, [dayToPlan]: outfit }));
                       setPlannerModalVisible(false);
-                      Alert.alert(lang === 'tr' ? '✅ Planlandı' : '✅ Scheduled', lang === 'tr' ? `${dayToPlan} günü için harika bir seçim!` : `Great choice for ${dayToPlan}!`);
+                      showAlert(lang === 'tr' ? '✅ Planlandı' : '✅ Scheduled', lang === 'tr' ? `${dayToPlan} günü için harika bir seçim!` : `Great choice for ${dayToPlan}!`);
                     }
                   }}
                   style={{ backgroundColor: '#FFF', padding: 14, borderRadius: 16, borderWidth: 1, borderColor: '#EDE8E1', marginBottom: 12 }}
@@ -1582,7 +1716,7 @@ Analyze this clothing item and respond ONLY in the following JSON format. Fill e
               <TouchableOpacity
                 onPress={() => {
                   setIsPro(!isPro);
-                  Alert.alert('✨', !isPro
+                  showAlert('✨', !isPro
                     ? (lang === 'tr' ? 'Aura Pro aktifleştirildi! (Demo — gerçek ödeme alınmadı)' : 'Aura Pro activated! (Demo — no real payment taken)')
                     : (lang === 'tr' ? 'Ücretsiz plana dönüldü.' : 'Switched back to the free plan.'));
                 }}
@@ -1614,7 +1748,7 @@ Analyze this clothing item and respond ONLY in the following JSON format. Fill e
                 </View>
                 <View style={{ width: 1, backgroundColor: '#EDE8E1' }} />
                 <View style={{ alignItems: 'center' }}>
-                  <Text style={{ fontSize: 18, fontWeight: '700', color: '#1C1B1A' }}>{colorAnalysis.season.split(' ')[0]}</Text>
+                  <Text style={{ fontSize: 18, fontWeight: '700', color: '#1C1B1A' }}>{colorAnalysis.analyzedAt ? colorAnalysis.season.split(' ')[0] : '—'}</Text>
                   <Text style={{ fontSize: 11, color: '#8C857E', marginTop: 2 }}>{lang === 'tr' ? 'Renk Tipi' : 'Season'}</Text>
                 </View>
               </View>
@@ -1674,7 +1808,7 @@ Analyze this clothing item and respond ONLY in the following JSON format. Fill e
               {/* Dolabı Sıfırlama */}
               <TouchableOpacity
                 onPress={() => {
-                  Alert.alert(
+                  showAlert(
                     lang === 'tr' ? 'Dolabı Sıfırla' : 'Reset Wardrobe',
                     lang === 'tr' ? 'Tüm yüklediğiniz kıyafetler ve kayıtlı kombinler silinsin mi?' : 'Clear all wardrobe items and saved looks?',
                     [
@@ -1690,7 +1824,7 @@ Analyze this clothing item and respond ONLY in the following JSON format. Fill e
                             { id: '2', title: 'Hafta Sonu & Kahve', outfits: [] },
                             { id: '3', title: 'Spor & Casual', outfits: [] }
                           ]);
-                          Alert.alert('✅', lang === 'tr' ? 'Dolap sıfırlandı.' : 'Closet has been reset.');
+                          showAlert('✅', lang === 'tr' ? 'Dolap sıfırlandı.' : 'Closet has been reset.');
                         }
                       }
                     ]
@@ -1708,6 +1842,35 @@ Analyze this clothing item and respond ONLY in the following JSON format. Fill e
         )}
 
       </ScrollView>
+
+      {/* Tarayıcıda Alert.alert yerine kamera / galeri seçimi. */}
+      <Modal
+        visible={photoPickerVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setPhotoPickerVisible(false)}
+      >
+        <View style={styles.photoPickerOverlay}>
+          <View style={styles.photoPickerCard}>
+            <Text style={styles.photoPickerTitle}>{lang === 'tr' ? 'Kıyafet Ekle' : 'Add Item'}</Text>
+            <Text style={styles.photoPickerDescription}>
+              {lang === 'tr' ? 'Fotoğrafı nereden eklemek istersin?' : 'Where would you like to add the photo from?'}
+            </Text>
+            <TouchableOpacity accessibilityRole="button" onPress={openCamera} style={styles.photoPickerButton}>
+              <Camera size={20} color="#1C1B1A" />
+              <Text>{lang === 'tr' ? 'Kamera' : 'Camera'}</Text>
+            </TouchableOpacity>
+            <TouchableOpacity accessibilityRole="button" onPress={openGallery} style={styles.photoPickerButton}>
+              <GalleryIcon size={20} color="#1C1B1A" />
+              <Text>{lang === 'tr' ? 'Galeri' : 'Gallery'}</Text>
+            </TouchableOpacity>
+            {!!photoPickerError && <Text accessibilityRole="alert" style={{ color: '#B42318', marginTop: 12 }}>{photoPickerError}</Text>}
+            <TouchableOpacity accessibilityRole="button" onPress={() => setPhotoPickerVisible(false)} style={styles.photoPickerButton}>
+              <Text>{lang === 'tr' ? 'İptal' : 'Cancel'}</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
 
       {/* Alt Menü */}
       <View style={styles.bottomTabBar}>
@@ -1884,61 +2047,41 @@ Analyze this clothing item and respond ONLY in the following JSON format. Fill e
           </View>
         </KeyboardAvoidingView>
       </Modal>
-{/* 1. İLK GİRİŞ TARZ TESTİ MODALI */}
-      <Modal visible={quizModalVisible} animationType="fade" transparent={false}>
-        <View style={{ flex: 1, backgroundColor: '#FAF8F5', padding: 24, justifyContent: 'center' }}>
-          <View style={{ alignItems: 'center', marginBottom: 28 }}>
-            <Sparkles size={36} color="#1C1B1A" />
-            <Text style={{ fontSize: 24, fontWeight: '800', color: '#1C1B1A', marginTop: 12, textAlign: 'center' }}>
-              Tarzını Seç
-            </Text>
-            <Text style={{ fontSize: 13, color: '#8C857E', textAlign: 'center', marginTop: 6, paddingHorizontal: 20 }}>
-              Sana en uygun ilham akışını ve kombin önerilerini hazırlamamız için stilini belirle.
-            </Text>
-          </View>
+      <StyleQuiz
+        visible={quizModalVisible} lang={lang} step={quizStep} answers={quizAnswers} result={quizResult}
+        onAnswer={(question, answer) => setQuizAnswers(previous => ({ ...previous, [question]: answer }))}
+        onStep={setQuizStep} onClose={() => setQuizModalVisible(false)} onSave={saveStyleQuiz}
+      />
 
-          <View style={{ gap: 12, marginBottom: 30 }}>
-            {['Minimalist', 'Old Money', 'Streetwear', 'Casual Chic'].map((styleName) => {
-              const isSelected = userStylePreference === styleName;
-              return (
-                <TouchableOpacity
-                  key={styleName}
-                  onPress={() => setUserStylePreference(styleName)}
-                  style={{
-                    backgroundColor: isSelected ? '#1C1B1A' : '#FFFFFF',
-                    padding: 18,
-                    borderRadius: 16,
-                    borderWidth: 1,
-                    borderColor: isSelected ? '#1C1B1A' : '#EDE8E1',
-                    flexDirection: 'row',
-                    justifyContent: 'space-between',
-                    alignItems: 'center'
-                  }}
-                >
-                  <Text style={{ fontSize: 15, fontWeight: '700', color: isSelected ? '#FFF' : '#1C1B1A' }}>
-                    {styleName}
-                  </Text>
-                  {isSelected && <Sparkles size={18} color="#FFF" />}
-                </TouchableOpacity>
-              );
-            })}
-          </View>
-
-          <TouchableOpacity
-            onPress={() => {
-              setHasCompletedQuiz(true);
-              setQuizModalVisible(false);
-            }}
-            style={{
-              backgroundColor: '#1C1B1A',
-              paddingVertical: 16,
-              borderRadius: 16,
-              alignItems: 'center'
-            }}
-          >
-            <Text style={{ fontSize: 15, fontWeight: '700', color: '#FFF' }}>Uygulamaya Başla</Text>
-          </TouchableOpacity>
-        </View>
+      <Modal visible={matchModalVisible} animationType="slide" onRequestClose={() => setMatchModalVisible(false)}>
+        <SafeAreaView style={{ flex: 1, backgroundColor: '#FAF8F5' }}>
+          <ScrollView contentContainerStyle={{ padding: 24, width: '100%', maxWidth: 680, alignSelf: 'center', gap: 18 }}>
+            <View style={styles.rowBetween}>
+              <Text style={{ fontSize: 22, fontWeight: '800' }}>{lang === 'tr' ? 'İlhamdan dolabına' : 'From inspiration to your closet'}</Text>
+              <TouchableOpacity accessibilityRole="button" onPress={() => setMatchModalVisible(false)} style={{ padding: 12 }}><X size={24} color="#1C1B1A" /></TouchableOpacity>
+            </View>
+            {matchingLoading ? <View style={{ padding: 30, alignItems: 'center', gap: 16 }}>
+              <ActivityIndicator size="large" color="#2A5C6A" />
+              <Text>{lang === 'tr' ? 'Fotoğraf ve dolabındaki parçalar inceleniyor...' : 'Examining the photo and your wardrobe...'}</Text>
+            </View> : matchedOutfitResult && <View style={{ gap: 16 }}>
+              <Text style={styles.cardTitle}>{matchedOutfitResult.inspireTitle}</Text>
+              <Image source={{ uri: matchedOutfitResult.image }} style={{ width: '100%', height: 280, borderRadius: 16 }} resizeMode="contain" />
+              <Text style={{ lineHeight: 23 }}>{matchedOutfitResult.note}</Text>
+              <ScrollView horizontal contentContainerStyle={{ gap: 12 }}>
+                {matchedOutfitResult.items.map(item => <View key={item.id} style={{ width: 110 }}>
+                  <Image source={{ uri: item.uri }} style={{ width: 110, height: 130, borderRadius: 14 }} />
+                  <Text style={{ marginTop: 8 }}>{getItemField(item, 'subCategory', lang)}</Text>
+                </View>)}
+              </ScrollView>
+              <Text style={{ color: '#7A6856', lineHeight: 22 }}>{matchedOutfitResult.missingPiece}</Text>
+              <TouchableOpacity accessibilityRole="button" style={styles.primaryButton} onPress={() => {
+                setCurrentOutfit({ title: matchedOutfitResult.inspireTitle, note: matchedOutfitResult.note, items: matchedOutfitResult.items });
+                setActiveTab('home');
+                setMatchModalVisible(false);
+              }}><Text style={styles.primaryButtonText}>{lang === 'tr' ? 'Bu kombini kullan' : 'Use this outfit'}</Text></TouchableOpacity>
+            </View>}
+          </ScrollView>
+        </SafeAreaView>
       </Modal>
 
       {/* 2. MANUEL KOMBİN OLUŞTURUCU (STUDIO) MODALI */}
@@ -2022,7 +2165,7 @@ Analyze this clothing item and respond ONLY in the following JSON format. Fill e
                   onPress={() => {
                     setWeeklyPlanner(prev => ({ ...prev, [dayToPlan]: outfit }));
                     setPlannerModalVisible(false);
-                    Alert.alert(lang === 'tr' ? '✅ Planlandı' : '✅ Scheduled', lang === 'tr' ? `${dayToPlan} günü için harika bir seçim!` : `Great choice for ${dayToPlan}!`);
+                    showAlert(lang === 'tr' ? '✅ Planlandı' : '✅ Scheduled', lang === 'tr' ? `${dayToPlan} günü için harika bir seçim!` : `Great choice for ${dayToPlan}!`);
                   }}
                   style={{ backgroundColor: '#FFF', padding: 14, borderRadius: 16, borderWidth: 1, borderColor: '#EDE8E1', marginBottom: 12 }}
                 >
@@ -2131,7 +2274,7 @@ Analyze this clothing item and respond ONLY in the following JSON format. Fill e
               // Şimdilik test için basınca Pro yapıyor
               setIsProUser(true);
               setProModalVisible(false);
-              Alert.alert(
+              showAlert(
                 lang === 'tr' ? 'Hoş Geldin VIP' : 'Welcome VIP',
                 lang === 'tr' ? 'Aura Premium özellikleri aktif edildi!' : 'Aura Premium features have been activated!'
               );
@@ -2145,11 +2288,21 @@ Analyze this clothing item and respond ONLY in the following JSON format. Fill e
           </TouchableOpacity>
         </View>
       </Modal> 
+      {dialogView}
     </SafeAreaView>
   );
 }
   
 const styles = StyleSheet.create({
+  primaryButton: { backgroundColor: '#1C1B1A', borderRadius: 14, padding: 15, alignItems: 'center' },
+  primaryButtonText: { color: '#FFF', fontWeight: '700', textAlign: 'center' },
+  filterChip: { paddingHorizontal: 15, paddingVertical: 10, borderRadius: 20, backgroundColor: '#EDE8E1' },
+  inspirationCard: { flexGrow: 1, flexBasis: '30%', minWidth: 240, maxWidth: 420, backgroundColor: '#FFF', borderRadius: 20, overflow: 'hidden', borderWidth: 1, borderColor: '#EDE8E1' },
+  photoPickerOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.4)', justifyContent: 'center', alignItems: 'center', padding: 24 },
+  photoPickerCard: { backgroundColor: '#FFF', borderRadius: 24, padding: 24, width: '100%', maxWidth: 400 },
+  photoPickerTitle: { fontSize: 20, fontWeight: '800', color: '#1C1B1A', marginBottom: 8 },
+  photoPickerDescription: { color: '#7A6856', marginBottom: 16 },
+  photoPickerButton: { flexDirection: 'row', alignItems: 'center', gap: 12, padding: 16, backgroundColor: '#FAF8F5', borderRadius: 12, marginTop: 8 },
   safeArea: { flex: 1, backgroundColor: '#FAF8F5' },
   topHeader: {
     flexDirection: 'row',
