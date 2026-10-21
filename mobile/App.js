@@ -45,6 +45,8 @@ import { useAppDialog } from './AppDialog';
 import { STYLE_NAMES, STYLE_LABELS, STYLE_QUESTIONS, scoreStyleProfile, styleContext, parseAIJson, selectOutfitItems } from './styleProfile';
 import { inspirationFeed, loadInspirationImage } from './inspirations';
 import StyleQuiz from './StyleQuiz';
+import Onboarding, { ONBOARDING_KEY } from './Onboarding';
+import { buildStylistParts, pickShoppingPhoto } from './shoppingAssistant';
 
 // === GÜVENLİK NOTU ===
 // API anahtarları artık uygulamanın içinde DEĞİL. Anahtarlar (Gemini, Remove.bg)
@@ -193,6 +195,7 @@ export default function App() {
   const [lang, setLang] = useState('tr');
   const { showAlert, dialogView } = useAppDialog(lang);
   const [dataLoaded, setDataLoaded] = useState(false);
+  const [onboardingVisible, setOnboardingVisible] = useState(false);
   const [wardrobe, setWardrobe] = useState([]);
   const [hasCompletedQuiz, setHasCompletedQuiz] = useState(false);
   const [userStylePreference, setUserStylePreference] = useState('Minimalist');
@@ -221,7 +224,9 @@ export default function App() {
   // 1. UYGULAMA AÇILDIĞINDA VERİLERİ HAFIZADAN YÜKLE
   useEffect(() => {
     const loadData = async () => {
+      let onboardingSeen = false;
       try {
+        onboardingSeen = await AsyncStorage.getItem(ONBOARDING_KEY) === 'done';
         const storedWardrobe = await AsyncStorage.getItem('aura_wardrobe');
         if (storedWardrobe) setWardrobe(JSON.parse(storedWardrobe));
 
@@ -262,6 +267,7 @@ export default function App() {
       } catch (e) {
         console.log('Veri yükleme hatası:', e);
       } finally {
+        setOnboardingVisible(!onboardingSeen);
         setDataLoaded(true);
       }
     };
@@ -283,8 +289,8 @@ export default function App() {
 
   // Uygulama açılınca konumu ve hava durumunu çek
   useEffect(() => {
-    fetchLiveWeather();
-  }, []);
+    if (dataLoaded && !onboardingVisible) fetchLiveWeather();
+  }, [dataLoaded, onboardingVisible]);
 
   const fetchLiveWeather = async () => {
     try {
@@ -355,6 +361,10 @@ export default function App() {
   ]);
   const [inputText, setInputText] = useState('');
   const [chatLoading, setChatLoading] = useState(false);
+  const [chatAttachment, setChatAttachment] = useState(null);
+  const [chatPickingPhoto, setChatPickingPhoto] = useState(false);
+  const chatSendLock = useRef(false);
+  const chatScroll = useRef(null);
 
   // Kişisel Renk Analizi State'i
   const [colorAnalysis, setColorAnalysis] = useState({
@@ -399,6 +409,16 @@ export default function App() {
     ? `${colorAnalysis.season}, ${colorAnalysis.undertone}; ${colorAnalysis.palette.map(color => `${color.name}: ${color.hex}`).join(', ')}`
     : (lang === 'tr' ? 'Kişisel renk analizi henüz yapılmadı; bir renk tipi varsayma.' : 'Personal colors have not been analyzed; do not assume a color season.');
 
+  const finishOnboarding = async (action) => {
+    setOnboardingVisible(false);
+    if (action === 'wardrobe') setActiveTab('wardrobe');
+    try {
+      await AsyncStorage.setItem(ONBOARDING_KEY, 'done');
+    } catch (error) {
+      console.log('Başlangıç tercihi kaydedilemedi:', error);
+    }
+  };
+
   const startStyleQuiz = () => {
     setQuizAnswers(styleProfile?.answers || {});
     setQuizStep(0);
@@ -418,10 +438,10 @@ export default function App() {
 
   // Dolap güncellendiğinde veya Home sekmesine geçildiğinde kombin üret
   useEffect(() => {
-    if (dataLoaded && activeTab === 'home' && wardrobe.length > 0 && !currentOutfit) {
+    if (dataLoaded && !onboardingVisible && activeTab === 'home' && wardrobe.length > 0 && !currentOutfit) {
       generateSmartOutfit();
     }
-  }, [dataLoaded, activeTab, wardrobe, styleProfile, colorAnalysis.analyzedAt]);
+  }, [dataLoaded, onboardingVisible, activeTab, wardrobe, styleProfile, colorAnalysis.analyzedAt]);
 
   // AI Zeki Kombin Motoru
   const generateSmartOutfit = async () => {
@@ -733,59 +753,60 @@ Return ONLY valid JSON, with field values in English:
     }
   };
 
-  const handleSendMessage = async () => {
-    if (!inputText.trim() || chatLoading) return;
+  const selectChatPhoto = async (source) => {
+    if (chatLoading || chatPickingPhoto) return;
+    setChatPickingPhoto(true);
+    try {
+      const photo = await pickShoppingPhoto(source, { imagePicker: ImagePicker, platform: Platform.OS });
+      if (photo) setChatAttachment(photo);
+    } catch (error) {
+      showAlert(lang === 'tr' ? 'Fotoğraf eklenemedi' : 'Could not add photo', lang === 'tr'
+        ? 'Kamera veya fotoğraf iznini kontrol et. Daha küçük bir JPEG, PNG veya WebP fotoğrafıyla tekrar dene.'
+        : 'Check camera or photo access. Try a smaller JPEG, PNG or WebP photo.');
+    } finally {
+      setChatPickingPhoto(false);
+    }
+  };
 
-    const userMsg = { id: Date.now().toString(), sender: 'user', text: inputText.trim() };
+  const openChatPhotoMenu = () => {
+    if (chatLoading || chatPickingPhoto) return;
+    showAlert(lang === 'tr' ? 'Kıyafeti asistana göster' : 'Show your stylist a piece',
+      lang === 'tr' ? 'Mağazada gördüğün veya almayı düşündüğün kıyafetin fotoğrafını seç.' : 'Choose a photo of a piece you found or are considering buying.', [
+        { text: lang === 'tr' ? 'Kamera' : 'Camera', onPress: () => selectChatPhoto('camera') },
+        { text: lang === 'tr' ? 'Galeri' : 'Gallery', onPress: () => selectChatPhoto('gallery') },
+        { text: lang === 'tr' ? 'İptal' : 'Cancel', style: 'cancel' },
+      ]);
+  };
+
+  const handleSendMessage = async (retryMessage) => {
+    const retry = retryMessage?.sender === 'user' ? retryMessage : null;
+    const draftText = retry ? retry.text : inputText;
+    const draftPhoto = retry ? retry.attachment : chatAttachment;
+    if ((!draftText.trim() && !draftPhoto) || chatSendLock.current || chatLoading || chatPickingPhoto) return;
+    chatSendLock.current = true;
+    const text = draftText.trim() || (lang === 'tr' ? 'Bu kıyafeti almalı mıyım? Dolabımla ve tarzımla uyumunu değerlendir.' : 'Should I buy this piece? Consider my wardrobe and style.');
+    const userMsg = { id: Date.now().toString(), sender: 'user', text, attachment: draftPhoto };
     setChatMessages(prev => [...prev, userMsg]);
-    setInputText('');
+    if (!retry) {
+      setInputText('');
+      setChatAttachment(null);
+    }
     setChatLoading(true);
 
     try {
-      // 1. Sohbet AI'ı için Kirlileri filtrele ve Favori etiketini ekle
-      const availableWardrobe = wardrobe.filter(w => !w.isDirty);
-      const wardrobeSummary = availableWardrobe.map(w => 
-        lang === 'tr'
-          ? `${getItemField(w, 'subCategory', lang)} (${getItemField(w, 'color', lang)}, ${getItemField(w, 'style', lang)}, ${w.mainCategory}, Desen: ${getItemField(w, 'pattern', lang) || 'Düz'}) ${w.isFavorite ? '[FAVORİ PARÇA]' : ''}`
-          : `${getItemField(w, 'subCategory', lang)} (${getItemField(w, 'color', lang)}, ${getItemField(w, 'style', lang)}, ${w.mainCategory}, Pattern: ${getItemField(w, 'pattern', lang) || 'Plain'}) ${w.isFavorite ? '[FAVORITE ITEM]' : ''}`
-      ).join('; ');
-      
-      const prompt = lang === 'tr' ? `Sen dünyanın en iyi, samimi ve vizyoner kişisel moda stilistisin (Personal AI Stylist).
-Kullanıcının gardırobundaki kullanıma hazır (TEMİZ) parçalar: ${wardrobeSummary || 'Dolapta henüz temiz/kayıtlı kıyafet yok.'}
-Kullanıcının Renk Tipi / Alt Tonu: ${colorAnalysis.season} - ${colorAnalysis.undertone}
-Stil testi ve tercihler: ${personalStyleContext}
-Doğrulanmış renk analizi bağlamı: ${personalColorContext}
-Güncel Hava Durumu: ${weather.city}, ${weather.temp}°C, ${weather.desc}
-
-Kullanıcının Sorusu/İsteği: "${userMsg.text}"
-
-GÖREV:
-- Kullanıcının dolabındaki TEMİZ parçaları bilerek ve güncel hava durumuna dikkat ederek önerilerde bulun.
-- Kullanıcının [FAVORİ PARÇA] olarak işaretlediği kıyafetlere öncelik ver ve kombinlerine mutlaka dahil etmeye çalış.
-- Modada katmanlama (layering) ve desen uyumu (örn: iki farklı karmaşık deseni karıştırmama) kurallarına dikkat et.
-- Dolabında olmayan parçaları da tamamlayıcı öneri olarak söyleyebilirsin.
-- Yanıtın samimi, şık, ilham verici ve net olsun (en fazla 2-3 kısa paragraf), Türkçe yaz.` : `You are the world's best, warm and visionary Personal AI Stylist.
-Ready-to-wear (CLEAN) items in the user's wardrobe: ${wardrobeSummary || 'No clean/saved items in the closet yet.'}
-User's Color Season / Undertone: ${colorAnalysis.season} - ${colorAnalysis.undertone}
-Style test and preferences: ${personalStyleContext}
-Available color analysis context: ${personalColorContext}
-Current Weather: ${weather.city}, ${weather.temp}°C, ${weather.desc}
-
-User's Question/Request: "${userMsg.text}"
-
-TASK:
-- Give suggestions being aware of the user's CLEAN closet items and the current weather.
-- Prioritize items marked [FAVORITE ITEM] and try hard to include them in outfits.
-- Respect layering rules and pattern coordination (e.g. don't mix two busy patterns).
-- You can also suggest complementary items the user doesn't currently own.
-- Keep the tone warm, stylish, inspiring and clear (max 2-3 short paragraphs), write in English.`;
-
-      const reply = await callGeminiAPI([{ text: prompt }]);
+      const parts = buildStylistParts({
+        message: userMsg.text, attachment: userMsg.attachment, history: chatMessages,
+        wardrobe, style: personalStyleContext, colors: personalColorContext, weather, lang,
+      });
+      const reply = await callGeminiAPI(parts);
       setChatMessages(prev => [...prev, { id: (Date.now() + 1).toString(), sender: 'ai', text: reply }]);
     } catch (e) {
       console.log('Chat Hatası:', e);
-      setChatMessages(prev => [...prev, { id: (Date.now() + 1).toString(), sender: 'ai', text: lang === 'tr' ? 'Üzgünüm, şu an bağlantıda ufak bir sorun var. Tekrar sorabilir misiniz?' : 'Sorry, there seems to be a small connection issue right now. Could you ask again?' }]);
+      setChatMessages(prev => [...prev, { id: (Date.now() + 1).toString(), sender: 'ai', error: true, text: e.retryable
+        ? (lang === 'tr' ? 'AI servisi şu an yoğun. Fotoğrafını veya sorunu tekrar göndermek için “Tekrar dene”ye dokun.' : 'The AI service is busy. Tap “Try again” to resend your photo or question.')
+        : (lang === 'tr' ? 'Yanıt alınamadı. Fotoğrafını veya sorunu tekrar göndermek için “Tekrar dene”ye dokun.' : 'Could not get a reply. Tap “Try again” to resend your photo or question.') }]);
     } finally {
+      chatSendLock.current = false;
       setChatLoading(false);
     }
   };
@@ -1697,6 +1718,15 @@ Analyze this clothing item and respond ONLY in the following JSON format. Fill e
               </View>
             </View>
 
+            <TouchableOpacity accessibilityRole="button" onPress={() => setOnboardingVisible(true)} style={[styles.sectionCard, { flexDirection: 'row', alignItems: 'center', gap: 12 }]}>
+              <Sparkles size={22} color="#2A5C6A" />
+              <View style={{ flex: 1 }}>
+                <Text style={styles.cardTitle}>{lang === 'tr' ? 'Aura nasıl kullanılır?' : 'How to use Aura'}</Text>
+                <Text style={styles.subText}>{lang === 'tr' ? 'Örnek gardropla kısa başlangıç turu' : 'A quick tour with a sample wardrobe'}</Text>
+              </View>
+              <Text style={{ color: '#7A6856', fontSize: 20 }}>→</Text>
+            </TouchableOpacity>
+
             {/* Pro Yükseltme Banner'ı */}
             <View style={[styles.sectionCard, { backgroundColor: '#1C1B1A', borderColor: '#1C1B1A' }]}>
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 6 }}>
@@ -1957,10 +1987,10 @@ Analyze this clothing item and respond ONLY in the following JSON format. Fill e
               </View>
               <View>
                 <Text style={{ fontSize: 15, fontWeight: '700', color: '#1C1B1A' }}>Aura AI Stilist</Text>
-                <Text style={{ fontSize: 11, color: '#7A6856' }}>Dolabınız ve paletiniz hazır</Text>
+                <Text style={{ fontSize: 11, color: '#7A6856' }}>{lang === 'tr' ? 'Kombin sor veya alışveriş fotoğrafını göster' : 'Ask about outfits or show a shopping photo'}</Text>
               </View>
             </View>
-            <TouchableOpacity onPress={() => setChatVisible(false)} style={{ padding: 4 }}>
+            <TouchableOpacity accessibilityRole="button" accessibilityLabel={lang === 'tr' ? 'Sohbeti kapat' : 'Close chat'} onPress={() => setChatVisible(false)} style={{ padding: 4 }}>
               <X size={22} color="#1C1B1A" />
             </TouchableOpacity>
           </View>
@@ -1969,9 +1999,10 @@ Analyze this clothing item and respond ONLY in the following JSON format. Fill e
           <ScrollView 
             style={{ flex: 1, padding: 16 }} 
             contentContainerStyle={{ gap: 12, paddingBottom: 20 }}
-            ref={ref => ref?.scrollToEnd({ animated: true })}
+            ref={chatScroll}
+            onContentSizeChange={() => chatScroll.current?.scrollToEnd({ animated: true })}
           >
-            {chatMessages.map(msg => (
+            {chatMessages.map((msg, messageIndex) => (
               <View 
                 key={msg.id} 
                 style={{
@@ -1985,6 +2016,7 @@ Analyze this clothing item and respond ONLY in the following JSON format. Fill e
                   borderColor: '#EDE8E1'
                 }}
               >
+                {!!msg.attachment && <Image source={{ uri: msg.attachment.uri }} accessibilityLabel={lang === 'tr' ? 'Asistana gönderilen alışveriş adayı' : 'Shopping candidate sent to your stylist'} resizeMode="contain" style={{ width: 210, maxWidth: '100%', height: 190, borderRadius: 12, backgroundColor: '#F3EDE2', marginBottom: 10 }} />}
                 <Text style={{
                   fontSize: 13,
                   color: msg.sender === 'user' ? '#FFFFFF' : '#1C1B1A',
@@ -1992,6 +2024,9 @@ Analyze this clothing item and respond ONLY in the following JSON format. Fill e
                 }}>
                   {msg.text}
                 </Text>
+                {!!msg.error && <TouchableOpacity accessibilityRole="button" disabled={chatLoading} onPress={() => handleSendMessage(chatMessages.slice(0, messageIndex).reverse().find(item => item.sender === 'user'))} style={{ paddingVertical: 10 }}>
+                  <Text style={{ color: '#2A5C6A', fontWeight: '700' }}>{lang === 'tr' ? 'Tekrar dene' : 'Try again'}</Text>
+                </TouchableOpacity>}
               </View>
             ))}
             {chatLoading && (
@@ -2002,6 +2037,14 @@ Analyze this clothing item and respond ONLY in the following JSON format. Fill e
             )}
           </ScrollView>
 
+          {!!chatAttachment && <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12, padding: 14, backgroundColor: '#FFF', borderTopWidth: 1, borderColor: '#EDE8E1' }}>
+            <Image source={{ uri: chatAttachment.uri }} resizeMode="cover" style={{ width: 64, height: 70, borderRadius: 10 }} />
+            <View style={{ flex: 1 }}>
+              <Text style={{ fontWeight: '700', color: '#1C1B1A' }}>{lang === 'tr' ? 'Alışveriş adayı' : 'Shopping candidate'}</Text>
+              <Text style={{ fontSize: 12, lineHeight: 18, color: '#7A6856', marginTop: 4 }}>{lang === 'tr' ? 'Gönderince asistan değerlendirir. Gardrobuna eklenmez.' : 'Your stylist reviews it when you send. It is not added to your wardrobe.'}</Text>
+            </View>
+            <TouchableOpacity accessibilityRole="button" accessibilityLabel={lang === 'tr' ? 'Fotoğrafı kaldır' : 'Remove photo'} onPress={() => setChatAttachment(null)} style={{ padding: 10 }}><X size={20} color="#1C1B1A" /></TouchableOpacity>
+          </View>}
           {/* Input Alanı */}
           <View style={{
             padding: 12,
@@ -2013,6 +2056,9 @@ Analyze this clothing item and respond ONLY in the following JSON format. Fill e
             gap: 10,
             paddingBottom: Platform.OS === 'ios' ? 28 : 12
           }}>
+            <TouchableOpacity accessibilityRole="button" accessibilityLabel={lang === 'tr' ? 'Asistana fotoğraf ekle' : 'Attach a photo for your stylist'} onPress={openChatPhotoMenu} disabled={chatLoading || chatPickingPhoto} style={{ padding: 10, opacity: chatLoading || chatPickingPhoto ? 0.4 : 1 }}>
+              {chatPickingPhoto ? <ActivityIndicator size="small" color="#2A5C6A" /> : <Camera size={23} color="#1C1B1A" />}
+            </TouchableOpacity>
             <TextInput
               style={{
                 flex: 1,
@@ -2025,7 +2071,7 @@ Analyze this clothing item and respond ONLY in the following JSON format. Fill e
                 borderWidth: 1,
                 borderColor: '#EDE8E1'
               }}
-              placeholder={lang === 'tr' ? 'Stiliste soru sor veya kombin iste...' : 'Ask your stylist...'}
+              placeholder={chatAttachment ? (lang === 'tr' ? 'Almalı mıyım? Fiyatı, bütçen...' : 'Should I buy it? Price, budget...') : (lang === 'tr' ? 'Stiliste sor veya fotoğraf ekle...' : 'Ask your stylist or attach a photo...')}
               placeholderTextColor="#A8A29D"
               value={inputText}
               onChangeText={setInputText}
@@ -2033,6 +2079,9 @@ Analyze this clothing item and respond ONLY in the following JSON format. Fill e
             />
             <TouchableOpacity 
               onPress={handleSendMessage}
+              accessibilityRole="button"
+              accessibilityLabel={lang === 'tr' ? 'Mesajı gönder' : 'Send message'}
+              disabled={chatLoading || chatPickingPhoto || (!inputText.trim() && !chatAttachment)}
               style={{
                 width: 40,
                 height: 40,
@@ -2288,6 +2337,7 @@ Analyze this clothing item and respond ONLY in the following JSON format. Fill e
           </TouchableOpacity>
         </View>
       </Modal> 
+      <Onboarding visible={onboardingVisible} lang={lang} onComplete={finishOnboarding} />
       {dialogView}
     </SafeAreaView>
   );

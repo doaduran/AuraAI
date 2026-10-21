@@ -27,17 +27,32 @@ Browse outfit photos, filter by style, and ask Aura to match a reference image w
 
 Screenshots show the actual application with its Turkish interface. The app also supports English. The home screen shows an empty wardrobe and a sample palette; the profile result uses demonstration answers.
 
+<details>
+  <summary>First-run tour & shopping assistant</summary>
+  <table>
+    <tr><th>A quick introduction</th><th>Ask before you buy</th></tr>
+    <tr>
+      <td><img src="docs/images/onboarding.png" alt="First-run introduction using a clearly labeled sample wardrobe, with swipe navigation and a skip button" width="460"></td>
+      <td><img src="docs/images/shopping-assistant.png" alt="A generated sample garment photo and a real AI shopping response using a demonstration style profile and an empty wardrobe" width="460"></td>
+    </tr>
+  </table>
+  <p>The wardrobe illustration is generated example imagery. The shopping screenshot shows a real AI response with demonstration preferences and an empty wardrobe. Shopping candidates are not automatically added to the user's wardrobe.</p>
+</details>
+
 ## Try the demo
 
-1. Open **[AuraAI](https://shrill-dawn-2c7b.aura-closet.workers.dev/)** in your browser.
+1. Open **[AuraAI](https://shrill-dawn-2c7b.aura-closet.workers.dev/)** in your browser and follow or skip the introductory tour.
 2. Tap **Stilini Bul / Find Your Style** and answer five questions to create your profile.
 3. Open **Dolap / Closet** to add a clothing photo from your camera or gallery.
 4. Explore **İlham / Explore** to browse looks and match one with your wardrobe.
+5. Open the stylist chat, attach a camera/gallery photo, and ask whether a potential purchase fits your wardrobe. Include the price and your budget when relevant.
 
 Camera behavior depends on your device and browser; desktop browsers may open a file picker. AI features require the backend services to be available.
 
 ## Features
 
+- **Swipeable introduction:** four short screens with sample wardrobe imagery, next/back/skip controls, and a replay option in Profile. Completion is remembered on the current device/browser.
+- **Shopping photo assistant:** attach and preview a potential purchase, ask for wardrobe/style compatibility, and continue the conversation about the same photo. Failed requests can be retried without reselecting it.
 - **Digital wardrobe:** add clothing photos, analyze their category, color, style and pattern, and organize favorites and laundry status.
 - **Five-question style profile:** record your aesthetic, fit, color preferences, usual occasions and outfit priorities. The profile includes primary and secondary styles and informs outfit suggestions and stylist chat.
 - **AI outfit suggestions:** combine clean wardrobe items using your profile, weather context and favorites. Returned item IDs are checked against the available wardrobe.
@@ -81,9 +96,9 @@ npm test
 npm run build:web
 ```
 
-The current suite has 21 automated tests, including all 1,536 possible style-test answer combinations, photo selection, AI response handling and wardrobe item validation.
+The current suite has 29 automated tests, including all 1,536 possible style-test answer combinations, photo selection, shopping-image messages and retries, AI response handling and wardrobe item validation.
 
-For the current manual Cloudflare deployment, upload the **contents** of `mobile/dist/`: `_expo/`, `index.html` and `metadata.json`.
+For the current manual Cloudflare deployment, upload **all contents** of `mobile/dist/`: `_expo/`, `assets/`, `index.html` and `metadata.json`.
 
 ## Repository structure
 

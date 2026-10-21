@@ -2,7 +2,7 @@
 
 ## Cloudflare'a elle yükleme
 
-Hazır web sürümü `mobile/dist` klasöründedir. `shrill-dawn-2c7b` projesinin yeni yayın ekranında klasörün **içindeki** `_expo`, `index.html` ve `metadata.json` öğelerini birlikte yükle. Klasör zaten derlenmiştir; tekrar derlemek gerekmez.
+Hazır web sürümü `mobile/dist` klasöründedir. `shrill-dawn-2c7b` projesinin yeni yayın ekranında klasörün **içindeki tüm öğeleri** birlikte yükle: `_expo`, `assets`, `index.html` ve `metadata.json`. Yeni başlangıç görseli için `assets` klasörü gereklidir. Klasör zaten derlenmiştir; tekrar derlemek gerekmez.
 
 Yayından sonra sayfayı tamamen yenile. Ana sayfadan beş soruluk testi bitirip kaydet; sayfayı yenileyince sonuç korunmalı. Selfie ile Analiz'de kamera/galeri menüsünü, İlham'da fotoğrafları ve filtreleri dene. Gerçek fotoğraf seçme ve kamera açılışı kullanılan cihazda ayrıca denenmelidir; masaüstü tarayıcı kamera yerine dosya seçiciyi açabilir.
 
@@ -15,6 +15,9 @@ Bu güncelleme artık sadece App.js'den oluşmuyor. `AuraAI-kaynak-guncellemesi.
 - StyleQuiz.js
 - styleProfile.js
 - inspirations.js
+- Onboarding.js
+- shoppingAssistant.js
+- assets klasörü
 - package.json
 - tests klasörü
 
@@ -22,6 +25,8 @@ Bilgisayardaki `C:\Users\dogaa\Desktop\mobile` projesini kullanmaya devam edecek
 
 ## Neler değişti?
 
+- İlk açılışta dört sayfalık kaydırmalı başlangıç turu eklenir; örnek gardrop gösterilir, gerçek dolaba örnek parça eklenmez. Tur atlanabilir, tamamlandıktan sonra otomatik açılmaz ve profilden yeniden izlenebilir.
+- Asistan sohbetine kamera/galeriden alışveriş adayı eklenebilir. Fotoğraf önizlenir, kaldırılabilir ve gönderildiğinde tarz/dolap bağlamıyla değerlendirilir. Aday gardroba otomatik eklenmez. Devam soruları son gönderilen fotoğrafı korur; başarısız istek tekrar denenebilir.
 - Web'de desteklenmeyen uyarı ve seçim menüleri uygulama içi pencereyle açılır. Selfie seçicisi doğrudan tıklamada başlar; PNG/JPEG türü korunur, mobil izinler kontrol edilir.
 - Beş soruluk stil testi altı stil arasında puanlama yapar; ana ve ikincil stil ile kesim, renk, ortam ve öncelik cevaplarını saklar. Bu bir tercih testidir, psikometrik ölçüm veya eğitilmiş kişisel model değildir.
 - Günlük kombin ve stilist sohbeti test cevaplarını kullanır. Kişisel palet yalnızca yeni bir selfie analizinden sonra AI bağlamına eklenir. Varsayılan palet kişisel analiz gibi sunulmaz.
@@ -37,3 +42,5 @@ Bilgisayardaki `C:\Users\dogaa\Desktop\mobile` projesini kullanmaya devam edecek
 21 Ekim 2026'da canlı `/gemini` adresine kişisel veri içermeyen üç örnek kıyafetle gönderilen tek istekte HTTP 502 / model yoğunluğu yanıtı alındı. Dolayısıyla canlı öneri kalitesi ve gerçek selfie analizi başarıyla doğrulanmış değildir. Modelin görsel anlama yeteneği olması, stil önerilerinin kalitesini garanti etmez. Gerçek örneklerle ayrıca değerlendirilmelidir. Mevcut Worker kodu/Cloudflare ayarları bu güncellemede değiştirilmedi.
 
 Fotoğraf kaynakları ve kullanım koşulları her karttaki Unsplash bağlantılarında bulunur. Bu sürüm fotoğraf lisanslarını Unsplash+ ile karıştırmadan, ücretsiz Unsplash lisanslı bir seçki kullanır.
+
+22 Ekim 2026 kontrolü: üretilmiş örnek kıyafet fotoğrafı ve test profiliyle alışveriş sohbetinden gerçek bir AI yanıtı alındı. Yanıt, profil tercihlerini kullandı ve boş dolap için sahip olunmayan parçaları uydurmadı. Başlangıç turunun kaydırılması, bitirilmesi, yenilemede tekrar açılmaması ve profilden yeniden izlenmesi de tarayıcıda doğrulandı.
