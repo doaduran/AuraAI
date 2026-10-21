@@ -1,9 +1,10 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Image, Modal, SafeAreaView, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
-import { ArrowRight, Camera, Check, Sparkles } from 'lucide-react-native';
+import { ArrowRight, Camera, Check, MessageCircle, Sparkles } from 'lucide-react-native';
 import { INSPIRATIONS } from './inspirations';
 
 const SAMPLE_WARDROBE = require('./assets/onboarding/sample-wardrobe.png');
+const SAMPLE_OUTFIT = require('./assets/onboarding/sample-outfit.png');
 export const ONBOARDING_KEY = 'aura_onboarding_v1';
 export const ONBOARDING_SLIDES = [
   { title: { tr: 'Dolabını cebine taşı', en: 'Your closet, in your pocket' }, description: { tr: 'Kıyafetlerini fotoğrafla. Renkleri ve türleriyle düzenli bir gardrop oluştur.', en: 'Photograph your clothes and organize your wardrobe by color and category.' } },
@@ -43,13 +44,18 @@ export default function Onboarding({ visible, lang, onComplete }) {
                         <Text style={{ color: '#1C1B1A' }}>{lang === 'tr' ? answer.split(' · ')[0] : answer.split(' · ')[1]}</Text>
                         {i === 0 && <Check size={16} color="#2A5C6A" />}
                       </View>)}
-                    </View> : index === 3 ? <View style={{ flex: 1, flexDirection: 'row', alignItems: 'center', padding: 12, gap: 10 }}>
+                    </View> : index === 2 ? <Image source={SAMPLE_OUTFIT} style={{ width: '100%', height: '100%' }} resizeMode="contain" accessibilityLabel={lang === 'tr' ? 'Örnek kıyafetlerle tamamlanmış beyaz gömlek ve bej pantolon kombini' : 'A complete example outfit with a white shirt and beige trousers'} /> : index === 3 ? <View style={{ flex: 1, flexDirection: 'row', alignItems: 'center', padding: 12, gap: 10 }}>
                       <Image source={{ uri: INSPIRATIONS[0].image }} style={{ flex: 1, height: '100%', borderRadius: 16 }} resizeMode="cover" accessibilityLabel={lang === 'tr' ? 'Örnek ilham fotoğrafı' : 'Example inspiration photo'} />
                       <ArrowRight size={22} color="#2A5C6A" />
-                      <Image source={SAMPLE_WARDROBE} style={{ flex: 1, height: '100%', borderRadius: 16 }} resizeMode="contain" accessibilityLabel={lang === 'tr' ? 'Örnek gardrop parçaları' : 'Sample wardrobe pieces'} />
+                      <View style={s.chatIllustration}>
+                        <MessageCircle size={24} color="#2A5C6A" />
+                        <Text style={s.chatHeading}>{lang === 'tr' ? 'Asistanına sor' : 'Ask your stylist'}</Text>
+                        <View style={s.chatBubble}><Text style={{ color: '#FFF', fontSize: 13, lineHeight: 19 }}>{lang === 'tr' ? 'Bunu almalı mıyım?' : 'Should I buy this?'}</Text></View>
+                        <Text style={{ color: '#7A6856', fontSize: 12, lineHeight: 18 }}>{lang === 'tr' ? 'Fotoğraf + tarzın + dolabın' : 'Photo + your style + your closet'}</Text>
+                      </View>
                     </View> : <Image source={SAMPLE_WARDROBE} style={{ width: '100%', height: '100%' }} resizeMode="contain" accessibilityLabel={lang === 'tr' ? 'Beyaz gömlek, bej pantolon, beyaz ayakkabı ve kemerden oluşan örnek gardrop' : 'Sample wardrobe: white shirt, beige trousers, white sneakers and a belt'} />}
                   </View>
-                  <Text style={s.example}>{lang === 'tr' ? (index === 1 ? 'ÖRNEK TERCİH' : index === 2 ? 'ÖRNEK KOMBİN' : 'ÖRNEK GARDROP') : (index === 1 ? 'EXAMPLE PREFERENCE' : index === 2 ? 'EXAMPLE OUTFIT' : 'SAMPLE WARDROBE')}</Text>
+                  <Text style={s.example}>{lang === 'tr' ? (index === 1 ? 'ÖRNEK TERCİH' : index === 2 ? 'ÖRNEK KOMBİN' : index === 3 ? 'ALIŞVERİŞ & İLHAM' : 'ÖRNEK GARDROP') : (index === 1 ? 'EXAMPLE PREFERENCE' : index === 2 ? 'EXAMPLE OUTFIT' : index === 3 ? 'SHOPPING & INSPIRATION' : 'SAMPLE WARDROBE')}</Text>
                   <Text style={s.title}>{slide.title[lang]}</Text>
                   <Text style={s.description}>{slide.description[lang]}</Text>
                   {index === 0 && <View style={s.caption}><Camera size={16} color="#7A6856" /><Text style={s.muted}>{lang === 'tr' ? 'Kamera veya galerinden ekle' : 'Add from your camera or gallery'}</Text></View>}
@@ -85,4 +91,6 @@ const s = StyleSheet.create({
   caption: { flexDirection: 'row', gap: 8, alignItems: 'center' }, credit: { fontSize: 10, color: '#7A6856' }, footer: { paddingBottom: 20, paddingTop: 8 }, dots: { flexDirection: 'row', justifyContent: 'center', marginBottom: 12 }, dot: { width: 7, height: 7, borderRadius: 4, backgroundColor: '#D9D2C8' }, activeDot: { width: 22, backgroundColor: '#2A5C6A' },
   next: { flex: 1, flexDirection: 'row', justifyContent: 'center', alignItems: 'center', gap: 10, backgroundColor: '#1C1B1A', borderRadius: 16, padding: 17 }, nextText: { flexShrink: 1, fontSize: 13, fontWeight: '700', color: '#FFF', textAlign: 'center' }, back: { padding: 17, borderRadius: 16, backgroundColor: '#EDE8E1', justifyContent: 'center' },
   testIllustration: { flex: 1, padding: 20, justifyContent: 'center', gap: 10 }, sampleTitle: { fontSize: 17, fontWeight: '700', marginBottom: 3 }, answer: { flexDirection: 'row', justifyContent: 'space-between', backgroundColor: '#FFF', borderWidth: 1, borderColor: '#EDE8E1', borderRadius: 12, padding: 13 },
+  chatIllustration: { flex: 1, height: '100%', justifyContent: 'center', gap: 12, padding: 14, backgroundColor: '#FFF', borderRadius: 16 },
+  chatHeading: { fontWeight: '700', fontSize: 15, color: '#1C1B1A' }, chatBubble: { padding: 12, borderRadius: 12, backgroundColor: '#1C1B1A' },
 });
