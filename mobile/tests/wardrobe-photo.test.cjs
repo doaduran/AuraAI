@@ -25,6 +25,8 @@ function setup({ platform = 'web', result, denied = false, failure = false, full
   const context = {
     Platform: { OS: platform }, lang: 'tr', isProUser: false,
     wardrobe: full ? [1] : [], FREE_ITEM_LIMIT: 1,
+    wardrobeReady: { current: true },
+    photoQueue: { current: { count: 0, add: photos => photos.forEach(args => calls.push({ source: 'analyze', args: Array.from(args) })) } },
     setPhotoPickerVisible: record('visible'), setPhotoPickerError: record('error'),
     setProModalVisible: record('pro'),
     showAlert: (...args) => calls.push({ source: 'alert', args }),

@@ -6,13 +6,17 @@ genelde ~512MB RAM ile çalışacak şekilde tasarlandı.
 
 ## Mimari kararlar ve neden
 
+Canlı Render servisi bu klasörden değil, ayrı
+[`doaduran/aura-bg-removal`](https://github.com/doaduran/aura-bg-removal)
+deposundan yayınlanır. Bu klasör aynı uygulamanın referans kopyasıdır.
+
 - **rembg yerine ham onnxruntime.** `rembg` paketini kurmak `scipy`, `scikit-image`,
   `opencv-python-headless`, `pymatting` gibi ağır bağımlılıkları da zorunlu kılıyor; bunlar sunucu
   hiç istek almadan sadece açılırken bile ~300–400MB taban bellek tüketiyordu. Bunun yerine
   `u2netp.onnx` modelini (4MB) build sırasında imaja gömüp doğrudan `onnxruntime` ile çalıştırıyoruz.
-- **Tek seferde tek görsel.** FastAPI, senkron route'ları bir thread pool'da çalıştırır; art arda
-  gelen istekler paralel işlenirse bellek ihtiyacı katlanır. Bir `threading.Lock` ile inference'ı
-  serileştirip dar bellek bütçesinde ani OOM'ları önlüyoruz.
+- **Tek seferde tek görsel.** Görsel açılmadan önce tek işleme hakkı alınır. Eşzamanlı ek
+  istekler bellek ayırmak yerine `503` ve `Retry-After: 2` yanıtı alır. Model ve görsel
+  kopyalarının birden fazla istekte aynı anda belleğe açılması önlenir.
 - **ONNX memory arena kapalı.** `enable_cpu_mem_arena=False` / `enable_mem_pattern=False` —
   varsayılan arena istekler arasında büyüyüp geri küçülmüyor, bu da zamanla bellek şişmesine katkı
   sağlıyordu.
@@ -21,7 +25,8 @@ genelde ~512MB RAM ile çalışacak şekilde tasarlandı.
   bozulmasına sebep oluyordu.
 - **JPEG draft-decode + thumbnail.** Telefon fotoğrafları (örn. 4032×3024) tam çözünürlükte belleğe
   açılmadan önce `Image.draft()` ile küçük decode ediliyor, ardından `thumbnail()` ile kesin sınıra
-  çekiliyor.
+  çekiliyor. RGBA kopyası küçültmeden sonra oluşturulur. Kodlanmış giriş en fazla 10 MiB,
+  kaynak görüntü en fazla 50 milyon pikseldir. Tek Uvicorn işçisi çalışır.
 
 ## Çalıştırma
 

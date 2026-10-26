@@ -8,8 +8,8 @@ from typing import Optional
 import numpy as np
 import onnxruntime as ort
 from fastapi import FastAPI, Header, HTTPException
-from pydantic import BaseModel
-from PIL import Image
+from pydantic import BaseModel, Field
+from PIL import Image, ImageOps
 
 app = FastAPI()
 
@@ -30,10 +30,6 @@ sess_opts = ort.SessionOptions()
 # şekilde ayarlıyoruz).
 sess_opts.intra_op_num_threads = 1
 sess_opts.inter_op_num_threads = 1
-# onnxruntime'ın CPU bellek arenası varsayılan olarak büyüdükçe büyür ve
-# istekler arasında geri küçülmez - zamanla "memory doldu" hatalarına
-# katkıda bulunan sinsi bir etken. Kapatınca her run için normal
-# alloc/free kullanılıyor, arena şişmiyor.
 sess_opts.enable_cpu_mem_arena = False
 sess_opts.enable_mem_pattern = False
 
@@ -57,20 +53,11 @@ MAX_DIMENSION = 1024
 # adında bir secret eklersen, sadece doğru anahtarla gelen istekler kabul
 # edilir. Eklemezsen bu kontrol devre dışı kalır, hiçbir şeyi bozmaz.
 PROXY_SECRET = os.environ.get("PROXY_SECRET")
-
-# FastAPI, senkron (async olmayan) route'ları bir thread pool'da çalıştırır.
-# Yani art arda hızlıca gelen iki istek, aynı process içinde AYNI ANDA
-# işlenmeye çalışılır - her biri kendi decode edilmiş görselini ve ONNX
-# çalışma belleğini tutar, bu da anlık bellek ihtiyacını ikiye (veya daha
-# fazlasına) katlar. 512MB gibi dar bir limitte bu "iki kıyafette bir
-# memory doldu" hatasının asıl sebebiydi. Bu kilit, aynı anda yalnızca
-# tek bir görselin işlenmesini garanti eder; istekler sıraya girer,
-# bellek asla katlanmaz.
-inference_lock = threading.Lock()
+processing_slot = threading.BoundedSemaphore(1)
 
 
 class RemoveBgRequest(BaseModel):
-    image_file_b64: str
+    image_file_b64: str = Field(min_length=1, max_length=10 * 1024 * 1024)
 
 
 def predict_mask(img: Image.Image) -> Image.Image:
@@ -79,7 +66,7 @@ def predict_mask(img: Image.Image) -> Image.Image:
     im = img.convert("RGB").resize(MODEL_INPUT_SIZE, Image.LANCZOS)
 
     im_ary = np.array(im).astype(np.float32)
-    im_ary = im_ary / np.max(im_ary)
+    im_ary /= max(float(np.max(im_ary)), 1.0)
 
     tmp_img = np.zeros((im_ary.shape[0], im_ary.shape[1], 3), dtype=np.float32)
     tmp_img[:, :, 0] = (im_ary[:, :, 0] - MEAN[0]) / STD[0]
@@ -91,7 +78,7 @@ def predict_mask(img: Image.Image) -> Image.Image:
     ort_outs = session.run(None, ort_input)
     pred = ort_outs[0][:, 0, :, :]
     ma, mi = np.max(pred), np.min(pred)
-    pred = (pred - mi) / (ma - mi)
+    pred = (pred - mi) / max(float(ma - mi), 1e-8)
     pred = np.squeeze(pred)
 
     mask = Image.fromarray((pred * 255).astype(np.uint8), mode="L")
@@ -100,16 +87,12 @@ def predict_mask(img: Image.Image) -> Image.Image:
 
 
 def remove_background(img: Image.Image) -> Image.Image:
-    """Maskeyi doğrudan alfa kanalı olarak uygular. Önceki sürüm
-    Image.composite() ile şeffaf siyah bir tuval üzerine composite
-    ediyordu; bu, kısmi (gri) maske değerlerinde RGB kanallarını da
-    siyaha doğru karıştırıp kenarlarda renk bozulmasına sebep oluyordu.
-    putalpha() orijinal renklere hiç dokunmaz, sadece şeffaflığı ayarlar.
-    """
+    """Apply alpha without an extra full-size transparent canvas."""
     mask = predict_mask(img)
-    rgba = img.convert("RGBA")
-    rgba.putalpha(mask)
-    return rgba
+    cutout = img.convert("RGBA")
+    cutout.putalpha(mask)
+    mask.close()
+    return cutout
 
 
 def trim_transparent_margin(img: Image.Image, margin_percent: float = 0.08) -> Image.Image:
@@ -141,36 +124,34 @@ def remove_bg(payload: RemoveBgRequest, x_proxy_secret: Optional[str] = Header(d
     if PROXY_SECRET and x_proxy_secret != PROXY_SECRET:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
+    # Acquire BEFORE decode, not just inference: PNG/JPEG decoding itself can
+    # otherwise allocate several full-size images in parallel on a 512 MB host.
+    if not processing_slot.acquire(blocking=False):
+        raise HTTPException(status_code=503, detail="Görsel işleniyor; tekrar dene.", headers={"Retry-After": "2"})
     try:
-        input_bytes = base64.b64decode(payload.image_file_b64)
-        input_image = Image.open(io.BytesIO(input_bytes))
+        try:
+            input_bytes = base64.b64decode(payload.image_file_b64, validate=True)
+            buffer = io.BytesIO(input_bytes)
+            with Image.open(buffer) as source:
+                if source.width * source.height > 50_000_000:
+                    raise ValueError("Image too large")
+                source.draft("RGB", (MAX_DIMENSION, MAX_DIMENSION))
+                source.thumbnail((MAX_DIMENSION, MAX_DIMENSION), Image.Resampling.LANCZOS)
+                # Shrink first, then create the RGBA copy; preserve phone orientation.
+                with ImageOps.exif_transpose(source) as oriented:
+                    input_image = oriented.convert("RGBA")
+            buffer.close()
+            del input_bytes, buffer
+        except Exception:
+            raise HTTPException(status_code=400, detail="Geçersiz veya çok büyük görsel verisi")
 
-        # ÖNEMLİ: JPEG'lerde draft(), dosyayı TAM ÇÖZÜNÜRLÜKTE decode etmeden
-        # önce JPEG'in kendi katmanlı yapısını kullanarak küçük boyutta decode
-        # etmeyi sağlar. Bu olmadan, thumbnail() çağrılsa bile telefon
-        # fotoğrafı (örn. 4032x3024) önce TAM boyutuyla belleğe açılıyordu -
-        # OOM'un asıl sebebi buydu. PNG'lerde draft() etkisizdir, zararı olmaz.
-        input_image.draft("RGB", (MAX_DIMENSION, MAX_DIMENSION))
-        input_image = input_image.convert("RGBA")
-    except Exception:
-        raise HTTPException(status_code=400, detail="Geçersiz görsel verisi")
-
-    # Draft sonrası boyut hâlâ MAX_DIMENSION'ı aşabilir (draft sadece 1/2, 1/4, 1/8
-    # gibi katlarda küçültür), bu yüzden thumbnail ile kesin sınıra çekiyoruz.
-    input_image.thumbnail((MAX_DIMENSION, MAX_DIMENSION), Image.LANCZOS)
-
-    with inference_lock:
-        output_image = remove_background(input_image)
-
-    output_image = trim_transparent_margin(output_image)
-
-    buffer = io.BytesIO()
-    output_image.save(buffer, format="PNG")
-    result_b64 = base64.b64encode(buffer.getvalue()).decode("utf-8")
-
-    # İşlem biten büyük görselleri hemen bellekten temizle, sıradaki isteğe temiz başla
-    del input_image, output_image, input_bytes, buffer
-    gc.collect()
-
-    # App.js / proxy'nin beklediği ile AYNI format: data.data.result_b64
-    return {"data": {"result_b64": result_b64}}
+        with input_image:
+            with remove_background(input_image) as output_image:
+                with trim_transparent_margin(output_image) as cropped:
+                    with io.BytesIO() as output:
+                        cropped.save(output, format="PNG")
+                        result_b64 = base64.b64encode(output.getvalue()).decode("ascii")
+        return {"data": {"result_b64": result_b64}}
+    finally:
+        gc.collect()
+        processing_slot.release()

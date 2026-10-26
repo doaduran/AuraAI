@@ -68,7 +68,7 @@ Camera behavior depends on your device and browser; desktop browsers may open a 
 | App & web interface | Expo, React Native, React Native Web, React |
 | Styling assistance | Gemini through a Cloudflare Worker proxy |
 | Photo selection | Expo ImagePicker |
-| Local storage | AsyncStorage |
+| Local storage | IndexedDB for web wardrobe photos; AsyncStorage for preferences and native storage |
 | Background removal | FastAPI, ONNX Runtime, U²-Net |
 | Web hosting | Cloudflare |
 
@@ -96,9 +96,11 @@ npm test
 npm run build:web
 ```
 
-The current suite has 29 automated tests, including all 1,536 possible style-test answer combinations, photo selection, shopping-image messages and retries, AI response handling and wardrobe item validation.
+The automated suite covers all 1,536 possible style-test answer combinations, photo selection and sequential queues, photo resizing, safe wardrobe storage migration, ordered saves and retries, shopping-image messages, AI response handling and wardrobe item validation.
 
-For the current manual Cloudflare deployment, upload **all contents** of `mobile/dist/`: `_expo/`, `assets/`, `index.html` and `metadata.json`.
+For manual Cloudflare deployment, upload **one folder or one ZIP** containing the complete web export: `_expo/`, `assets/`, `index.html` and `metadata.json`. In a ZIP, `index.html` must be at the archive root.
+
+Web wardrobe photos are resized to at most 1024 pixels before analysis and stored in IndexedDB, with an automatic migration from the previous localStorage record. Storage failures are shown in the interface. This remains device-local storage, not a cloud backup. Gallery photos can be selected together and processed sequentially while the app stays usable. Background removal has a 12-second timeout and falls back to the resized original; wardrobe analysis has a 35-second timeout, with failed photos kept in memory for retry during the current session.
 
 ## Repository structure
 

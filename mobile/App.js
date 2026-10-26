@@ -47,6 +47,8 @@ import { inspirationFeed, loadInspirationImage } from './inspirations';
 import StyleQuiz from './StyleQuiz';
 import Onboarding, { ONBOARDING_KEY } from './Onboarding';
 import { buildStylistParts, pickShoppingPhoto } from './shoppingAssistant';
+import wardrobeStorage from './wardrobeStorage';
+import { prepareWardrobePhoto, createPhotoQueue } from './prepareWardrobePhoto';
 
 // === GÜVENLİK NOTU ===
 // API anahtarları artık uygulamanın içinde DEĞİL. Anahtarlar (Gemini, Remove.bg)
@@ -66,13 +68,13 @@ const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 // Model yoğunluğu (503) ve kota (429) hatalarında proxy zaten kendi içinde
 // birden fazla modeli ve üstel bekleme (exponential backoff) ile dener.
 // Burada ayrıca ağ hatalarına karşı 1 ek deneme daha yapılır.
-async function callGeminiAPI(parts, generationConfig = {}) {
-  const maxRetries = 2;
+async function callGeminiAPI(parts, generationConfig = {}, requestOptions = {}) {
+  const maxRetries = requestOptions.retryNetwork === false ? 1 : 2;
   let lastError = null;
 
   for (let attempt = 0; attempt < maxRetries; attempt++) {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 60000);
+    const timeout = setTimeout(() => controller.abort(), requestOptions.timeoutMs || 60000);
     try {
       const response = await fetch(`${PROXY_BASE_URL}/gemini`, {
         method: 'POST',
@@ -114,9 +116,12 @@ async function callGeminiAPI(parts, generationConfig = {}) {
 // === MERKEZİ ARKA PLAN SİLME FONKSİYONU (Proxy üzerinden) ===
 // Başarısız olursa null döner; çağıran taraf orijinal fotoğrafla devam eder (fallback).
 async function removeBackgroundSafe(base64) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 12000);
   try {
     const res = await fetch(`${PROXY_BASE_URL}/removebg`, {
       method: 'POST',
+      signal: controller.signal,
       headers: {
         'Content-Type': 'application/json',
         ...(APP_SHARED_SECRET ? { 'X-App-Secret': APP_SHARED_SECRET } : {}),
@@ -144,6 +149,8 @@ async function removeBackgroundSafe(base64) {
   } catch (err) {
     console.log('Remove.bg ağ hatası, orijinal resimle devam ediliyor:', err);
     return null;
+  } finally {
+    clearTimeout(timeout);
   }
 }
 
@@ -197,6 +204,14 @@ export default function App() {
   const [dataLoaded, setDataLoaded] = useState(false);
   const [onboardingVisible, setOnboardingVisible] = useState(false);
   const [wardrobe, setWardrobe] = useState([]);
+  const wardrobeReady = useRef(false);
+  const [storageError, setStorageError] = useState('');
+  const [saveRevision, setSaveRevision] = useState(0);
+  const [photoCount, setPhotoCount] = useState(0);
+  const [failedPhotos, setFailedPhotos] = useState([]);
+  const photoProcessor = useRef(null);
+  const photoQueue = useRef(null);
+  if (!photoQueue.current) photoQueue.current = createPhotoQueue(photo => photoProcessor.current(...photo), setPhotoCount);
   const [hasCompletedQuiz, setHasCompletedQuiz] = useState(false);
   const [userStylePreference, setUserStylePreference] = useState('Minimalist');
   const [quizModalVisible, setQuizModalVisible] = useState(false); // Artık zorunlu değil, ana ekrandaki "Stilini Bul" kartından açılıyor
@@ -227,8 +242,9 @@ export default function App() {
       let onboardingSeen = false;
       try {
         onboardingSeen = await AsyncStorage.getItem(ONBOARDING_KEY) === 'done';
-        const storedWardrobe = await AsyncStorage.getItem('aura_wardrobe');
+        const storedWardrobe = await wardrobeStorage.getItem();
         if (storedWardrobe) setWardrobe(JSON.parse(storedWardrobe));
+        wardrobeReady.current = true;
 
         const storedCollections = await AsyncStorage.getItem('aura_collections');
         if (storedCollections) setCollections(JSON.parse(storedCollections));
@@ -266,6 +282,7 @@ export default function App() {
 
       } catch (e) {
         console.log('Veri yükleme hatası:', e);
+        if (!wardrobeReady.current) setStorageError('load');
       } finally {
         setOnboardingVisible(!onboardingSeen);
         setDataLoaded(true);
@@ -386,10 +403,9 @@ export default function App() {
   // eskiden daha yukarıdaydı ve "before initialization" hatası veriyordu - buraya,
   // kullandığı tüm state'lerin tanımından SONRAYA taşındı.)
   useEffect(() => {
-    if (!dataLoaded) return;
+    if (!dataLoaded || !wardrobeReady.current) return;
     const saveData = async () => {
       try {
-        await AsyncStorage.setItem('aura_wardrobe', JSON.stringify(wardrobe));
         await AsyncStorage.setItem('aura_collections', JSON.stringify(collections));
         await AsyncStorage.setItem('aura_colorAnalysis', JSON.stringify(colorAnalysis));
         await AsyncStorage.setItem('aura_isPro', JSON.stringify(isPro));
@@ -402,7 +418,19 @@ export default function App() {
       }
     };
     saveData();
-  }, [dataLoaded, wardrobe, collections, colorAnalysis, isPro, hasCompletedQuiz, userStylePreference, styleProfile, lang]);
+  }, [dataLoaded, collections, colorAnalysis, isPro, hasCompletedQuiz, userStylePreference, styleProfile, lang]);
+
+  useEffect(() => {
+    if (!dataLoaded || !wardrobeReady.current) return;
+    let current = true;
+    wardrobeStorage.setItem(JSON.stringify(wardrobe)).then(() => {
+      if (current) setStorageError('');
+    }).catch(error => {
+      console.log('Gardrop kaydedilemedi:', error);
+      if (current) setStorageError('save');
+    });
+    return () => { current = false; };
+  }, [dataLoaded, wardrobe, saveRevision]);
 
   const personalStyleContext = styleContext(styleProfile, userStylePreference, lang);
   const personalColorContext = colorAnalysis.analyzedAt
@@ -935,6 +963,10 @@ Respond ONLY in valid JSON, with "note" and color names in English:
 
   // 1. KAMERA VE GALERİ SEÇİM MENÜSÜ
   const handleAddPhoto = () => {
+    if (!wardrobeReady.current) {
+      showAlert(lang === 'tr' ? 'Dolap açılamadı' : 'Storage unavailable', lang === 'tr' ? 'Kayıtlı dolabını korumak için ekleme durduruldu. Diğer Aura sekmelerini kapatıp uygulamayı tekrar aç.' : 'Close other Aura tabs and reopen the app to access your saved wardrobe.');
+      return;
+    }
     if (Platform.OS === 'web') {
       setPhotoPickerError('');
       setPhotoPickerVisible(true);
@@ -953,7 +985,7 @@ Respond ONLY in valid JSON, with "note" and color names in English:
 
   // Web'de seçici, kullanıcı tıklamasından hemen başlatılmalı.
   const pickWardrobePhoto = async (source) => {
-    if (!isProUser && wardrobe.length >= FREE_ITEM_LIMIT) {
+    if (!isProUser && wardrobe.length + photoQueue.current.count >= FREE_ITEM_LIMIT) {
       setPhotoPickerVisible(false);
       setProModalVisible(true);
       return;
@@ -976,8 +1008,10 @@ Respond ONLY in valid JSON, with "note" and color names in English:
         }
       }
       const options = {
-        mediaTypes: ImagePicker.MediaTypeOptions.Images,
+        mediaTypes: ['images'],
         allowsEditing: false,
+        allowsMultipleSelection: source === 'gallery',
+        selectionLimit: isProUser ? 10 : Math.max(1, FREE_ITEM_LIMIT - wardrobe.length - photoQueue.current.count),
         base64: true,
         quality: 0.8,
       };
@@ -985,10 +1019,12 @@ Respond ONLY in valid JSON, with "note" and color names in English:
         ? await ImagePicker.launchCameraAsync(options)
         : await ImagePicker.launchImageLibraryAsync(options);
       if (result.canceled) return;
-      const asset = result.assets?.[0];
-      if (!asset?.uri || !asset.base64) throw new Error('Missing photo data');
+      const assets = result.assets;
+      if (!assets?.length || assets.some(asset => !asset.uri || !asset.base64)) throw new Error('Missing photo data');
+      const available = isProUser ? 10 : Math.max(0, FREE_ITEM_LIMIT - wardrobe.length - photoQueue.current.count);
+      if (assets.length > available) throw new Error(lang === 'tr' ? `En fazla ${available} fotoğraf daha ekleyebilirsin.` : `You can add ${available} more photos.`);
       setPhotoPickerVisible(false);
-      processAndAnalyzeImage(asset.uri, asset.base64, asset.mimeType || 'image/jpeg');
+      photoQueue.current.add(assets.map(asset => [asset.uri, asset.base64, asset.mimeType || 'image/jpeg']));
     } catch (error) {
       console.log('Fotoğraf seçme hatası:', error);
       const message = lang === 'tr'
@@ -1009,12 +1045,16 @@ Respond ONLY in valid JSON, with "note" and color names in English:
 // çalışan TEK merkezi fonksiyonlar olarak tanımlı (bkz. dosya başı).
 const processAndAnalyzeImage = async (imageUri, originalBase64, mimeType = 'image/jpeg') => {
   setLoading(true);
+  let retryPhoto = [imageUri, originalBase64, mimeType];
   try {
     if (!originalBase64) {
       throw new Error("Fotoğraf alınamadı. Lütfen tekrar çek.");
     }
 
-    setStatusMessage(lang === 'tr' ? 'Kıyafet hazırlanıyor ve analiz ediliyor...' : 'Preparing and analyzing the item...');
+    setStatusMessage(lang === 'tr' ? 'Fotoğraf küçültülüyor...' : 'Resizing photo...');
+    const photo = await prepareWardrobePhoto(imageUri, originalBase64, mimeType, Platform.OS);
+    retryPhoto = [photo.uri, photo.base64, photo.mimeType];
+    setStatusMessage(lang === 'tr' ? 'Kıyafet analiz ediliyor; başka fotoğraf da ekleyebilirsin.' : 'Analyzing item; you can add more photos.');
 
     // NOT: "mainCategory" değeri uygulama içinde sabit bir filtre anahtarı olarak kullanıldığı için
     // (bkz. UstGiyim/AltGiyim/TekParca/DisGiyim/AyakkabiAksesuar sekmeleri) dil ne olursa olsun
@@ -1049,18 +1089,22 @@ Analyze this clothing item and respond ONLY in the following JSON format. Fill e
     // Remove.bg ve Gemini istekleri AYNI ANDA çalışır, biri diğerini beklemez.
     // callGeminiAPI kendi içinde birden fazla modeli ve 429/503 hatalarında
     // üstel bekleme (exponential backoff) ile otomatik tekrar denemeyi yönetir.
-    const [cleanBase64, aiResponseText] = await Promise.all([
-      removeBackgroundSafe(originalBase64),
+    const [backgroundResult, analysisResult] = await Promise.allSettled([
+      removeBackgroundSafe(photo.base64),
       callGeminiAPI(
         [
           { text: prompt },
-          { inline_data: { mime_type: mimeType, data: originalBase64 } }
+          { inline_data: { mime_type: photo.mimeType, data: photo.base64 } }
         ],
-        { temperature: 0.1, responseMimeType: "application/json" }
+        { temperature: 0.1, responseMimeType: "application/json" },
+        { timeoutMs: 35000, retryNetwork: false }
       )
     ]);
+    if (analysisResult.status === 'rejected') throw analysisResult.reason;
+    const aiResponseText = analysisResult.value;
+    const cleanBase64 = backgroundResult.status === 'fulfilled' ? backgroundResult.value : null;
 
-    const finalDisplayUri = cleanBase64 ? `data:image/png;base64,${cleanBase64}` : imageUri;
+    const finalDisplayUri = cleanBase64 ? `data:image/png;base64,${cleanBase64}` : photo.uri;
 
     const jsonMatch = aiResponseText.match(/\{[\s\S]*\}/);
     const clothData = jsonMatch ? JSON.parse(jsonMatch[0]) : JSON.parse(aiResponseText);
@@ -1085,15 +1129,14 @@ Analyze this clothing item and respond ONLY in the following JSON format. Fill e
 
   } catch (error) {
     console.log("İşlem hatası:", error);
-    showAlert(
-      lang === 'tr' ? 'Ekleme Başarısız' : 'Failed to Add',
-      error.message || (lang === 'tr' ? 'Bilinmeyen bir hata oluştu.' : 'An unknown error occurred.')
-    );
+    setFailedPhotos(prev => [...prev, { photo: retryPhoto, message: error.name === 'AbortError'
+      ? (lang === 'tr' ? 'Analiz servisi zamanında yanıt vermedi.' : 'Analysis timed out.') : error.message }]);
   } finally {
     setLoading(false);
     setStatusMessage('');
   }
 };
+  photoProcessor.current = processAndAnalyzeImage;
   
   return (
     <SafeAreaView style={styles.safeArea}>
@@ -1108,7 +1151,28 @@ Analyze this clothing item and respond ONLY in the following JSON format. Fill e
       {loading && (
         <View style={styles.loadingBanner}>
           <ActivityIndicator size="small" color="#1C1B1A" />
-          <Text style={styles.loadingText}>{statusMessage}</Text>
+          <Text style={styles.loadingText}>{statusMessage} {photoCount > 1 ? `(${photoCount} ${lang === 'tr' ? 'fotoğraf sırada' : 'photos remaining'})` : ''}</Text>
+        </View>
+      )}
+      {!!storageError && (
+        <View style={{ padding: 12, backgroundColor: '#FFF0E8', gap: 8 }}>
+          <Text>{lang === 'tr'
+            ? (storageError === 'load' ? 'Kayıtlı dolabın açılamadı. Diğer Aura sekmelerini kapatıp tekrar aç; mevcut kayıtların değiştirilmedi.' : 'Son değişiklikler cihazına kaydedilemedi. Uygulamayı kapatmadan yeniden dene.')
+            : (storageError === 'load' ? 'Your wardrobe could not be opened. Close other Aura tabs and reopen. Existing records were not changed.' : 'Recent changes could not be saved. Retry before closing the app.')}</Text>
+          {storageError === 'save' && <TouchableOpacity onPress={() => setSaveRevision(value => value + 1)}><Text style={{ fontWeight: '700' }}>{lang === 'tr' ? 'Kaydetmeyi tekrar dene' : 'Retry saving'}</Text></TouchableOpacity>}
+        </View>
+      )}
+      {failedPhotos.length > 0 && (
+        <View style={{ padding: 12, backgroundColor: '#FFF0E8', gap: 8 }}>
+          <Text>{lang === 'tr' ? `${failedPhotos.length} fotoğraf eklenemedi. Seçtiklerin bu oturumda yeniden denemek için tutuluyor.` : `${failedPhotos.length} photos could not be added. They are kept for retry in this session.`}</Text>
+          <Text>{failedPhotos[0].message}</Text>
+          <TouchableOpacity onPress={() => {
+            const available = isProUser ? failedPhotos.length : Math.max(0, FREE_ITEM_LIMIT - wardrobe.length - photoQueue.current.count);
+            const retry = failedPhotos.slice(0, available);
+            setFailedPhotos(prev => prev.slice(retry.length));
+            photoQueue.current.add(retry.map(item => item.photo));
+          }}><Text style={{ fontWeight: '700' }}>{lang === 'tr' ? 'Fotoğrafları yeniden dene' : 'Retry photos'}</Text></TouchableOpacity>
+          <TouchableOpacity onPress={() => setFailedPhotos([])}><Text>{lang === 'tr' ? 'Vazgeç' : 'Dismiss'}</Text></TouchableOpacity>
         </View>
       )}
 
@@ -1837,6 +1901,7 @@ Analyze this clothing item and respond ONLY in the following JSON format. Fill e
 
               {/* Dolabı Sıfırlama */}
               <TouchableOpacity
+                disabled={photoCount > 0}
                 onPress={() => {
                   showAlert(
                     lang === 'tr' ? 'Dolabı Sıfırla' : 'Reset Wardrobe',
@@ -1848,6 +1913,7 @@ Analyze this clothing item and respond ONLY in the following JSON format. Fill e
                         style: 'destructive',
                         onPress: () => {
                           setWardrobe([]);
+                          setFailedPhotos([]);
                           setCurrentOutfit(null);
                           setCollections([
                             { id: '1', title: 'Minimal Ofis', outfits: [] },
@@ -2278,22 +2344,6 @@ Analyze this clothing item and respond ONLY in the following JSON format. Fill e
             )}
           </View>
         </TouchableOpacity>
-      </Modal>
-      {/* 1. LÜKS YÜKLEME (LOADING) EKRANI */}
-      <Modal visible={loading} transparent animationType="fade">
-        <View style={{ flex: 1, backgroundColor: 'rgba(250, 248, 245, 0.85)', justifyContent: 'center', alignItems: 'center' }}>
-          <View style={{ backgroundColor: '#FFF', padding: 32, borderRadius: 32, alignItems: 'center', shadowColor: '#1C1B1A', shadowOffset: { width: 0, height: 12 }, shadowOpacity: 0.08, shadowRadius: 24, elevation: 10, borderWidth: 1, borderColor: '#EDE8E1' }}>
-            <Sparkles size={40} color="#2A5C6A" style={{ marginBottom: 16 }} />
-            <Text style={{ fontSize: 18, fontWeight: '800', color: '#1C1B1A', marginBottom: 8 }}>
-              {(statusMessage?.includes('analiz') || statusMessage?.toLowerCase().includes('analyz'))
-                ? (lang === 'tr' ? 'Kıyafet İnceleniyor...' : 'Analyzing Item...')
-                : (lang === 'tr' ? 'Aura Düşünüyor...' : 'Aura is Thinking...')}
-            </Text>
-            <Text style={{ fontSize: 13, color: '#7A6856', textAlign: 'center' }}>
-              {statusMessage ? statusMessage : (lang === 'tr' ? 'Hava durumu ve dolabındaki\nkıyafetlerin uyumu hesaplanıyor 🪄' : 'Calculating the perfect match between\nthe weather and your closet 🪄')}
-            </Text>
-          </View>
-        </View>
       </Modal>
       {/* AURA PREMIUM (PAYWALL) EKRANI */}
       <Modal visible={proModalVisible} animationType="slide" presentationStyle="pageSheet" onRequestClose={() => setProModalVisible(false)}>
