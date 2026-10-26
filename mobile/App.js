@@ -85,6 +85,7 @@ async function callGeminiAPI(parts, generationConfig = {}, requestOptions = {}) 
         },
         body: JSON.stringify({
           parts,
+          ...(requestOptions.task ? { task: requestOptions.task } : {}),
           ...(Object.keys(generationConfig).length ? { generationConfig } : {})
         })
       });
@@ -1061,7 +1062,7 @@ const processAndAnalyzeImage = async (imageUri, originalBase64, mimeType = 'imag
     // AI'dan HER ZAMAN bu 5 sabit değerden biri isteniyor. Sadece subCategory/color/style/pattern
     // gösterim amaçlı olduğu için dile göre değişebiliyor.
     const prompt = lang === 'tr' ? `Sen Zara katalog standartlarında çalışan kıdemli bir moda uzmanısın.
-Bu kıyafeti analiz et ve SADECE aşağıdaki JSON formatında yanıt ver. Açıklama alanlarını HEM Türkçe HEM İngilizce doldur (uygulama dil değişince ikisi arasında geçiş yapabilsin):
+Bu fotoğraftaki tek bir kıyafeti analiz et ve SADECE aşağıdaki formatta TEK bir JSON nesnesi döndür. Birden fazla kıyafet varsa en belirgin tek parçayı seç; nesne listesi veya art arda nesneler döndürme. Açıklama alanlarını HEM Türkçe HEM İngilizce doldur:
 {
   "mainCategory": "UstGiyim / AltGiyim / TekParca / DisGiyim / AyakkabiAksesuar değerlerinden biri (bu alan HER ZAMAN bu İngilizce anahtar kelimelerden biri olmalı, çevirme)",
   "subCategory_tr": "Tişört/Pantolon vs. (Türkçe)",
@@ -1073,7 +1074,7 @@ Bu kıyafeti analiz et ve SADECE aşağıdaki JSON formatında yanıt ver. Açı
   "pattern_tr": "Düz/Çizgili/Baskılı (Türkçe)",
   "pattern_en": "Plain/Striped/Printed (İngilizce karşılığı)"
 }` : `You are a senior fashion expert working to Zara catalog standards.
-Analyze this clothing item and respond ONLY in the following JSON format. Fill every description field in BOTH Turkish AND English (so the app can switch between them when the language changes):
+Analyze ONE prominent clothing item in this photo and return exactly ONE JSON object in the following format. If several garments are visible, choose one; never return a list or successive objects. Fill every description field in BOTH Turkish AND English:
 {
   "mainCategory": "One of: UstGiyim / AltGiyim / TekParca / DisGiyim / AyakkabiAksesuar (this field must ALWAYS be one of these exact keywords, do not translate it)",
   "subCategory_tr": "Tişört/Pantolon etc. (Turkish version)",
@@ -1097,7 +1098,7 @@ Analyze this clothing item and respond ONLY in the following JSON format. Fill e
           { inline_data: { mime_type: photo.mimeType, data: photo.base64 } }
         ],
         { temperature: 0.1, responseMimeType: "application/json" },
-        { timeoutMs: 35000, retryNetwork: false }
+        { timeoutMs: 35000, retryNetwork: false, task: 'wardrobe' }
       )
     ]);
     if (analysisResult.status === 'rejected') throw analysisResult.reason;
@@ -1106,8 +1107,10 @@ Analyze this clothing item and respond ONLY in the following JSON format. Fill e
 
     const finalDisplayUri = cleanBase64 ? `data:image/png;base64,${cleanBase64}` : photo.uri;
 
-    const jsonMatch = aiResponseText.match(/\{[\s\S]*\}/);
-    const clothData = jsonMatch ? JSON.parse(jsonMatch[0]) : JSON.parse(aiResponseText);
+    const clothData = parseAIJson(aiResponseText);
+    if (!clothData || Array.isArray(clothData) || !['UstGiyim', 'AltGiyim', 'TekParca', 'DisGiyim', 'AyakkabiAksesuar'].includes(clothData.mainCategory)) {
+      throw new SyntaxError('Invalid clothing classification');
+    }
 
     const newItem = {
       id: Date.now().toString(),
@@ -1130,7 +1133,8 @@ Analyze this clothing item and respond ONLY in the following JSON format. Fill e
   } catch (error) {
     console.log("İşlem hatası:", error);
     setFailedPhotos(prev => [...prev, { photo: retryPhoto, message: error.name === 'AbortError'
-      ? (lang === 'tr' ? 'Analiz servisi zamanında yanıt vermedi.' : 'Analysis timed out.') : error.message }]);
+      ? (lang === 'tr' ? 'Analiz servisi zamanında yanıt vermedi.' : 'Analysis timed out.')
+      : error.name === 'SyntaxError' ? (lang === 'tr' ? 'Fotoğraf tek bir kıyafet olarak okunamadı. Tek parça içeren bir fotoğrafla tekrar dene.' : 'Could not identify one garment. Try a photo showing a single item.') : error.message }]);
   } finally {
     setLoading(false);
     setStatusMessage('');

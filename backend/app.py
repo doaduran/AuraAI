@@ -21,7 +21,7 @@ app = FastAPI()
 # neredeyse tüm bütçeyi tek başına tüketiyordu). Bunun yerine u2netp.onnx
 # modelini (4MB) doğrudan onnxruntime ile çalıştırıyoruz - Dockerfile bu
 # modeli build sırasında indirip imaja gömüyor, burada sadece yüklüyoruz.
-MODEL_PATH = os.environ.get("MODEL_PATH", "/app/models/u2netp.onnx")
+MODEL_PATH = os.environ.get("MODEL_PATH", "/app/models/u2netp-256.onnx")
 
 sess_opts = ort.SessionOptions()
 # Thread başına ayrılan ekstra bellek tamponunu sınırlamak için thread
@@ -32,6 +32,7 @@ sess_opts.intra_op_num_threads = 1
 sess_opts.inter_op_num_threads = 1
 sess_opts.enable_cpu_mem_arena = False
 sess_opts.enable_mem_pattern = False
+sess_opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_BASIC
 
 session = ort.InferenceSession(
     MODEL_PATH, sess_options=sess_opts, providers=["CPUExecutionProvider"]
@@ -40,14 +41,14 @@ INPUT_NAME = session.get_inputs()[0].name
 
 # u2netp'nin beklediği giriş boyutu ve ImageNet normalizasyon değerleri.
 # rembg'nin session_base.py / sessions/u2netp.py kaynağıyla doğrulandı.
-MODEL_INPUT_SIZE = (320, 320)
+MODEL_INPUT_SIZE = tuple(session.get_inputs()[0].shape[2:])
 MEAN = (0.485, 0.456, 0.406)
 STD = (0.229, 0.224, 0.225)
 
 # Telefon fotoğrafları genelde çok yüksek çözünürlüklü oluyor (örn. 4000x3000px),
 # bu da işlerken gereksiz yere fazla bellek harcatıyor. İşlemeden önce
 # uzun kenarı bu boyuta küçültüyoruz, kalite için yeterli, bellek için çok daha hafif.
-MAX_DIMENSION = 1024
+MAX_DIMENSION = 768
 
 # İsteğe bağlı basit koruma: Hugging Face Space ayarlarından "PROXY_SECRET"
 # adında bir secret eklersen, sadece doğru anahtarla gelen istekler kabul
@@ -133,7 +134,7 @@ def remove_bg(payload: RemoveBgRequest, x_proxy_secret: Optional[str] = Header(d
             input_bytes = base64.b64decode(payload.image_file_b64, validate=True)
             buffer = io.BytesIO(input_bytes)
             with Image.open(buffer) as source:
-                if source.width * source.height > 50_000_000:
+                if source.width * source.height > 20_000_000:
                     raise ValueError("Image too large")
                 source.draft("RGB", (MAX_DIMENSION, MAX_DIMENSION))
                 source.thumbnail((MAX_DIMENSION, MAX_DIMENSION), Image.Resampling.LANCZOS)

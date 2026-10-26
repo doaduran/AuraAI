@@ -102,6 +102,16 @@ For manual Cloudflare deployment, upload **one folder or one ZIP** containing th
 
 Web wardrobe photos are resized to at most 1024 pixels before analysis and stored in IndexedDB, with an automatic migration from the previous localStorage record. Storage failures are shown in the interface. This remains device-local storage, not a cloud backup. Gallery photos can be selected together and processed sequentially while the app stays usable. Background removal has a 12-second timeout and falls back to the resized original; wardrobe analysis has a 35-second timeout, with failed photos kept in memory for retry during the current session.
 
+The API proxy pins the verified Gemini model and requires a single clothing object
+through a response schema. Each model attempt has a 12-second limit, with one
+fallback model rather than repeated long retries. Proxy checks can be run from
+the repository root with `node --test worker/tests/*.test.cjs`.
+
+`mobile/wrangler.toml` also supports direct deployment to the existing web Worker:
+after a web export and Cloudflare login, run `wrangler deploy --keep-vars` inside
+`mobile/`. The separate API Worker is configured under `worker/`; the live Render
+background service deploys from [aura-bg-removal](https://github.com/doaduran/aura-bg-removal).
+
 ## Repository structure
 
 | Path | Purpose |

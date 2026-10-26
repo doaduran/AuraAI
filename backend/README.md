@@ -25,8 +25,12 @@ deposundan yayınlanır. Bu klasör aynı uygulamanın referans kopyasıdır.
   bozulmasına sebep oluyordu.
 - **JPEG draft-decode + thumbnail.** Telefon fotoğrafları (örn. 4032×3024) tam çözünürlükte belleğe
   açılmadan önce `Image.draft()` ile küçük decode ediliyor, ardından `thumbnail()` ile kesin sınıra
-  çekiliyor. RGBA kopyası küçültmeden sonra oluşturulur. Kodlanmış giriş en fazla 10 MiB,
-  kaynak görüntü en fazla 50 milyon pikseldir. Tek Uvicorn işçisi çalışır.
+  çekiliyor. RGBA kopyası küçültmeden sonra oluşturulur. Çıktı en fazla 768 piksel,
+  kodlanmış giriş en fazla 10 MiB, kaynak görüntü en fazla 20 milyon pikseldir.
+  Tek Uvicorn işçisi çalışır.
+- **256 piksel model girdisi.** Tam evrişimli U2NetP ağının uzamsal metadata'sı build
+  sırasında 256 piksele ayarlanır; ağırlıklar değişmez. Aktivasyon belleği azalır,
+  maske çıktı görselinin boyutuna geri ölçeklenir. Graph optimization BASIC kullanılır.
 
 ## Çalıştırma
 

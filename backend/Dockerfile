@@ -18,6 +18,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl \
     && apt-get purge -y curl && apt-get autoremove -y \
     && rm -rf /var/lib/apt/lists/*
 
+COPY prepare_model.py .
+RUN pip install --no-cache-dir onnx \
+    && python prepare_model.py /app/models/u2netp.onnx /app/models/u2netp-256.onnx \
+    && pip uninstall -y onnx ml_dtypes
+
 COPY app.py .
 
 # Farklı ücretsiz barındırma servisleri (Koyeb, Render, Cloud Run vb.) portu

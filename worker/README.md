@@ -32,5 +32,14 @@ npm run deploy    # Cloudflare'e deploy
 
 ## Endpoint'ler
 
-- `POST /gemini` — `{ parts, generationConfig }` → Gemini API yanıtını döner
+- `POST /gemini` — `{ parts, generationConfig, task? }` → Gemini API yanıtını döner
 - `POST /removebg` — `{ image_file_b64 }` → arka planı silinmiş görselin base64'ünü döner
+
+`task: "wardrobe"` tek kıyafet nesnesi için yanıt şeması ve düşük düşünme seviyesi
+kullanır. Birinci model `gemini-3.6-flash`, yedek `gemini-3.1-flash-lite` olarak
+sabitlenmiştir. Her model en fazla bir kez ve 12 saniye boyunca denenir; arka plan
+servisi için 10 saniye sınırı vardır. Günlükler sadece model, durum ve süre içerir;
+fotoğraf, mesaj veya anahtar yazılmaz. `X-Aura-Model` ve `Server-Timing` başarılı
+yanıtın hangi modelden ve ne kadar sürede geldiğini gösterir.
+
+Proxy kontrolleri: `node --test worker/tests/*.test.cjs` (depo kökünde).

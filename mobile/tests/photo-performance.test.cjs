@@ -74,3 +74,52 @@ test('snapshots save in order and a failed save can be retried', async () => {
   release.shift()(); await retry;
   assert.equal(calls.at(-1), 'retry');
 });
+
+function photoProcessor(reply, background = async () => null) {
+  const fs = require('node:fs'), path = require('node:path'), vm = require('node:vm');
+  const source = fs.readFileSync(path.join(__dirname, '../App.js'), 'utf8');
+  const code = source.slice(source.indexOf('const processAndAnalyzeImage ='), source.indexOf('  photoProcessor.current ='));
+  const state = { wardrobe: [], failed: [] };
+  const context = {
+    lang: 'tr', Platform: { OS: 'web' }, Date, console: { log() {} },
+    setLoading: value => { state.loading = value; }, setStatusMessage() {},
+    prepareWardrobePhoto: async () => ({ uri: 'data:image/jpeg;base64,small', base64: 'small', mimeType: 'image/jpeg' }),
+    parseAIJson: require('../styleProfile.js').parseAIJson,
+    removeBackgroundSafe: background,
+    callGeminiAPI: typeof reply === 'function' ? reply : async () => reply,
+    setWardrobe: update => { state.wardrobe = update(state.wardrobe); },
+    setFailedPhotos: update => { state.failed = update(state.failed); },
+  };
+  vm.createContext(context);
+  vm.runInContext(`${code}; this.processPhoto = processAndAnalyzeImage;`, context);
+  return { state, run: () => context.processPhoto('blob:original', 'original-large-photo', 'image/png') };
+}
+
+test('successful analysis saves a persistent resized photo when background removal is unavailable', async () => {
+  const processor = photoProcessor('{"mainCategory":"UstGiyim","subCategory_tr":"Gömlek"}');
+  await processor.run();
+  assert.equal(processor.state.wardrobe.length, 1);
+  assert.equal(processor.state.wardrobe[0].uri, 'data:image/jpeg;base64,small');
+  assert.equal(processor.state.loading, false);
+});
+
+test('multiple concatenated clothing objects are rejected with a readable retry message', async () => {
+  const processor = photoProcessor('{"mainCategory":"UstGiyim"}\n{"mainCategory":"AltGiyim"}');
+  await processor.run();
+  assert.equal(processor.state.wardrobe.length, 0);
+  assert.equal(processor.state.failed.length, 1);
+  assert.match(processor.state.failed[0].message, /Tek parça/);
+  assert.equal(processor.state.failed[0].photo[1], 'small');
+});
+
+test('analysis failure waits for the bounded background request before advancing the photo queue', async () => {
+  let release;
+  const processor = photoProcessor(async () => { throw new Error('Busy model'); }, () => new Promise(resolve => { release = resolve; }));
+  const running = processor.run();
+  await new Promise(setImmediate);
+  assert.equal(processor.state.loading, true);
+  release(null);
+  await running;
+  assert.equal(processor.state.failed.length, 1);
+  assert.equal(processor.state.loading, false);
+});
